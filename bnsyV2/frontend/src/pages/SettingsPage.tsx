@@ -818,7 +818,7 @@ export default function SettingsPage() {
 
   // ── 正常设置视图 ──
   return (
-    <>
+    <div className="max-w-[1280px] mx-auto">
       <PageHeader
         title="设置中心"
         description="管理网点、员工窗口和登录凭据"
@@ -989,16 +989,16 @@ export default function SettingsPage() {
                 className="grid border-b border-border"
                 style={{ gridTemplateColumns: '140px 160px 150px 72px' }}
               >
-                <div className="text-left text-[11px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
+                <div className="text-left text-[13px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
                   员工姓名
                 </div>
-                <div className="text-left text-[11px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
+                <div className="text-left text-[13px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
                   登录账号
                 </div>
-                <div className="text-left text-[11px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
+                <div className="text-left text-[13px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-3">
                   登录密码
                 </div>
-                <div className="text-center text-[11px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-2">
+                <div className="text-center text-[13px] font-semibold text-text-tertiary uppercase tracking-wider pb-3 px-2">
                   操作
                 </div>
               </div>
@@ -1316,7 +1316,7 @@ export default function SettingsPage() {
           </motion.div>
         )}
       </AnimatePresence>
-    </>
+    </div>
   );
 }
 

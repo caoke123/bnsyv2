@@ -11,7 +11,7 @@ export default function PageHeader({ title, description, actions, className }: P
   return (
     <div className={cn('flex items-start justify-between mb-6', className)}>
       <div>
-        <h1 className="text-display tracking-tight text-text-primary">{title}</h1>
+        <h1 className="text-h1 tracking-tight text-text-primary">{title}</h1>
         {description && (
           <p className="mt-1 text-[14px] text-text-tertiary">{description}</p>
         )}

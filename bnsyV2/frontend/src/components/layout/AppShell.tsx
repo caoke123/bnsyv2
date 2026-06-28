@@ -13,7 +13,7 @@ export default function AppShell() {
       <div className="flex flex-1 min-h-0">
         <Sidebar onCollapsedChange={setSidebarCollapsed} />
         <main className="flex-1 min-w-0 overflow-auto">
-          <div className="p-6 max-w-content mx-auto">
+          <div className="p-6">
             <Outlet />
           </div>
         </main>

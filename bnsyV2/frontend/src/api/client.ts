@@ -617,7 +617,7 @@ export async function getWindowsStatus(): Promise<WindowsStatusResponse> {
 // ── 站点窗口 4 态 API ──
 
 /** 窗口状态 */
-export type WindowState = 'offline' | 'connecting' | 'login_required' | 'connected' | 'ready' | 'busy' | 'degraded';
+export type WindowState = 'offline' | 'connecting' | 'login_required' | 'connected' | 'ready' | 'busy' | 'degraded' | 'failed';
 
 /** 单个站点窗口状态 */
 export interface SiteWindowState {

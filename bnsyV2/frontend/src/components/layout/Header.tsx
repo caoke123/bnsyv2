@@ -105,17 +105,28 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     };
   }, [pollInitTasks]);
 
-  // ★ Phase 4-D-Fix2: TTL 自动释放 — 当 siteWindows 更新时，
-  //   若某窗口的后端状态已是 ready/offline/busy，则自动清除其 initializingTasks 条目
-  //   防止本地 initializing 标记永久卡住
+  // ★ Phase 4-F: TTL 自动释放 — 当 siteWindows 更新时清理 stale initializingTasks
+  //   区分两类标记：
+  //   (a) pw-ensure / pw-launch-all — 由 handler 显式清理，TTL 不干预（保护活跃启动）
+  //   (b) legacy taskId / 空标记    — old EasyBR 路径，TTL 在终端状态时清理
+  //   offline 无条件清理（窗口已关闭，任何标记均应清除）
   useEffect(() => {
     setInitializingTasks(prev => {
       if (prev.size === 0) return prev;
       let changed = false;
       const next = new Map(prev);
       for (const windowName of prev.keys()) {
+        const marker = prev.get(windowName) ?? '';
         const sw = siteWindows.find(w => w.windowName === windowName);
-        if (sw && (sw.status === 'ready' || sw.status === 'offline' || sw.status === 'busy')) {
+        if (!sw) continue; // 窗口已从配置中移除
+
+        // offline — 总是清理（窗口已关闭）
+        if (sw.status === 'offline') {
+          next.delete(windowName);
+          changed = true;
+        }
+        // ready/busy — 只清理 legacy 非 pw- 标记（pw- 标记由 handleInitWindow/handleLaunchAll 显式清理）
+        else if ((sw.status === 'ready' || sw.status === 'busy') && !marker.startsWith('pw-')) {
           next.delete(windowName);
           changed = true;
         }
@@ -158,9 +169,30 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   //   执行节点（ScanWorkbench/SignPage）直接使用 w.status，不检查 initializingTasks
   //   Header 之前用 initializingTasks 覆盖 w.status，导致两者显示不一致
   //   修复：后端 READY > 本地 initializing（后端是权威源，本地 initializing 只用于非 ready 态）
+  // ★ Phase 4-F: 统一 getEffectiveStatus
+  //   优先级：busy > 本地 initializing > 后端 ready/P0 > 其他后端状态
+  //   busy 最高（安全）：任务运行中禁止误操作
+  //   本地 initializing 次高：确保点击启动后立即有蓝色 loading 反馈
+  //   后端 ready 需 P0 守卫检查通过才是真 ready，否则降级
+  // ★ Phase 4-H: 后端终态覆盖 initializing
+  //   一键启动时，先完成的员工后端已 ready/login_required/failed/degraded，
+  //   initializing 不应再覆盖，应立即显示终态。只有 backend 为过渡态
+  //   (connecting/connected/offline) 时 initializing 才生效。
   const getEffectiveStatus = (w: SiteWindowState): WindowState | 'initializing' => {
-    // ★ Phase 4-D-Fix2: 后端 ready 优先于本地 initializing
-    //   执行节点直接读 w.status，Header 不得用 initializing 覆盖 ready
+    // busy 最高优先级 — 执行中不允许任何覆盖
+    if (w.status === 'busy') return 'busy';
+
+    // ★ Phase 4-H: 后端终态优先 — initializing 仅在后端为过渡态时生效
+    //   终态：ready / login_required / failed / degraded → 直接显示
+    //   过渡态：connecting / connected / offline → 保留 initializing 蓝 loading
+    const backendTerminal = w.status === 'ready' || w.status === 'login_required'
+      || w.status === 'failed' || w.status === 'degraded';
+
+    if (initializingTasks.has(w.windowName) && !backendTerminal) {
+      return 'initializing';
+    }
+
+    // 后端 ready → P0 守卫降级检查
     if (w.status === 'ready') {
       if (isPlaywright) {
         const pw = w as PlaywrightSiteWindowState;
@@ -172,11 +204,10 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           return 'degraded';
         }
       }
-      // 后端确认为 ready → 直接返回，不检查 initializingTasks
       return 'ready';
     }
-    // 后端非 ready（如 offline/connecting/degraded/busy）→ 本地 initializing 才覆盖
-    if (initializingTasks.has(w.windowName)) return 'initializing';
+
+    // 其余后端状态原样返回（offline / connecting / login_required / degraded / failed）
     return w.status;
   };
 
@@ -202,6 +233,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           res.ready ? `Chrome 已就绪：${staffName}`
           : res.status === 'login_required' ? `需登录：${staffName}`
           : res.status === 'busy' ? `窗口执行中：${staffName}`
+          : res.status === 'failed' ? `弹窗清理失败：${staffName}`
           : `启动中：${staffName} (${res.status})`,
         );
         // Phase 4-D-Polish: 先清除初始化标记，再拉取最新状态
@@ -245,6 +277,35 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     }
     setLaunching(true);
     setLaunchMsg('');
+
+    // ★ Phase 4-F: 标记所有待启动窗口为启动中（蓝色 loading）
+    //   确保逐窗口 pill 在 launch-all 期间也有 loading 反馈
+    const launchTargets = isPlaywright
+      ? siteWindows.filter(w => w.status === 'offline' || w.status === 'degraded' || w.status === 'login_required')
+      : siteWindows.filter(w => w.status === 'offline');
+    if (launchTargets.length > 0) {
+      setInitializingTasks(prev => {
+        const next = new Map(prev);
+        launchTargets.forEach(w => next.set(w.windowName, 'pw-launch-all'));
+        return next;
+      });
+    }
+
+    // ★ Phase 4-F: pw- 标记清理辅助函数
+    const clearLaunchMarks = () => {
+      setInitializingTasks(prev => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [windowName, marker] of prev) {
+          if (marker === 'pw-launch-all') {
+            next.delete(windowName);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    };
+
     try {
       // playwright 模式：走 adapter.ensureWindowReady（不依赖 EasyBR）
       // legacy 模式：走原 EasyBR launch-all
@@ -254,6 +315,9 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
       setLaunchMsg(res.message);
       // Phase 4-D-Polish: await 确保状态立即同步，不等下一轮 polling
       await fetchSiteWindows();
+
+      // ★ Phase 4-F: 启动完成 → 清理所有 launch-all 标记
+      clearLaunchMarks();
 
       if (res.timeout || (res.failed === 0 && res.partial > 0 && res.launched === 0)) {
         setLaunchCooldown(true);
@@ -276,6 +340,8 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
       const msg = (e as Error).message || '请求失败';
       setLaunchMsg(`启动失败: ${msg}`);
       console.error('[Header] 一键启动失败:', e);
+      // ★ Phase 4-F: 异常时也清理标记
+      clearLaunchMarks();
       setLaunchCooldown(true);
       launchCooldownRef.current = setTimeout(() => {
         setLaunchCooldown(false);
@@ -329,9 +395,16 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   };
 
   // ── 状态 → 颜色映射 ──
-  // ★ login_required 态（需要登录）映射为黄色
-  //   connected/connecting 态（窗口已打开但 P0 未验证完成）映射为蓝色脉冲"启动中"
-  //   degraded 态（URL/DOM 临时异常但 CDP 在线）映射为橙色警告
+  // ★ Phase 4-F 语义收束：
+  //   offline:        灰色  — 未启动
+  //   connecting:     蓝色脉冲 — 后端正在启动/登录中（Playwright launching/logging_in → opening → connecting）
+  //   connected:      蓝色脉冲 — EasyBR 窗口已打开但 P0 未验证（legacy 模式）
+  //   initializing:   蓝色脉冲 — 前端本地标记，用户刚点击启动
+  //   ready:          绿色  — P0 / READY 通过
+  //   busy:           橙色走马灯 — 执行中
+  //   login_required: 黄色  — 需人工登录
+  //   degraded:       橙红  — 连接异常 / P0 未通过 / 不稳定
+  //   failed:         红色  — 启动或检测失败
   const statusColor: Record<string, string> = {
     offline: 'bg-text-tertiary',
     connecting: 'bg-primary animate-pulse',
@@ -341,6 +414,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     busy: 'bg-warning',
     degraded: 'bg-orange-500',
     initializing: 'bg-primary animate-pulse',
+    failed: 'bg-red-500',
   };
 
   const statusLabel: Record<string, string> = {
@@ -352,6 +426,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     busy: '执行中',
     degraded: '不稳定',
     initializing: '启动中',
+    failed: '失败',
   };
 
   // ── 渲染 ──
@@ -446,7 +521,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           return (
             <span
               key={sw.windowName}
-              className={`window-pill relative ${effectiveStatus === 'ready' ? 'online' : ''} ${effectiveStatus === 'connected' ? 'connected' : ''} ${effectiveStatus === 'connecting' ? 'connecting' : ''} ${effectiveStatus === 'login_required' ? 'login-required' : ''} ${effectiveStatus === 'initializing' ? 'initializing' : ''} ${effectiveStatus === 'busy' ? 'busy' : ''} ${effectiveStatus === 'offline' ? 'offline' : ''} ${effectiveStatus === 'degraded' ? 'degraded' : ''}`}
+              className={`window-pill relative ${effectiveStatus === 'ready' ? 'online' : ''} ${effectiveStatus === 'connected' ? 'connected' : ''} ${effectiveStatus === 'connecting' ? 'connecting' : ''} ${effectiveStatus === 'login_required' ? 'login-required' : ''} ${effectiveStatus === 'initializing' ? 'initializing' : ''} ${effectiveStatus === 'busy' ? 'busy' : ''} ${effectiveStatus === 'offline' ? 'offline' : ''} ${effectiveStatus === 'degraded' ? 'degraded' : ''} ${effectiveStatus === 'failed' ? 'failed' : ''}`}
               onMouseEnter={() => setHoveredWindow(sw.windowName)}
               onMouseLeave={() => setHoveredWindow(null)}
               onClick={() => {
@@ -466,15 +541,19 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
                 }
               }}
               title={`${fullLabel}\n状态：${statusLabel[effectiveStatus]}${
-                isOffline
-                  ? isPlaywright
-                    ? '\n点击启动 Chrome 窗口'
-                    : (hasBrowserId ? '\n点击启动' : '\n未匹配到EasyBR浏览器，请先在EasyBR中创建')
-                  : isPlaywright
-                    ? (effectiveStatus === 'ready'
-                        ? '\nChrome 窗口已打开'
-                        : '\n点击重新检查并收敛标签页')
-                    : '\n点击打开窗口，悬停显示关闭按钮'
+                effectiveStatus === 'failed'
+                  ? '\n弹窗清理失败，重启后仍未就绪'
+                  : effectiveStatus === 'degraded'
+                    ? '\nP0 未通过，窗口不稳定'
+                    : isOffline
+                      ? isPlaywright
+                        ? '\n点击启动 Chrome 窗口'
+                        : (hasBrowserId ? '\n点击启动' : '\n未匹配到EasyBR浏览器，请先在EasyBR中创建')
+                      : isPlaywright
+                        ? (effectiveStatus === 'ready'
+                            ? '\nChrome 窗口已打开'
+                            : '\n点击重新检查并收敛标签页')
+                        : '\n点击打开窗口，悬停显示关闭按钮'
               }${
                 // ★ Phase 4-B：playwright 模式下追加诊断字段
                 isPlaywright ? (() => {
@@ -499,14 +578,14 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
                     : ((isOffline && hasBrowserId) || (!isOffline && hasBrowserId))
                       ? 'pointer'
                       : 'not-allowed',
-                width: '78px',
-                minWidth: '78px',
-                maxWidth: '78px',
+                width: '84px',
+                minWidth: '84px',
+                maxWidth: '84px',
                 justifyContent: 'center',
               }}
             >
               {/* 状态点 */}
-              {effectiveStatus === 'initializing' || launching ? (
+              {effectiveStatus === 'initializing' ? (
                 <Loader2 className="w-[10px] h-[10px] text-primary animate-spin shrink-0" />
               ) : (
                 <span className={`pip ${statusColor[effectiveStatus]}`} />
@@ -514,12 +593,12 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
               <span
                 className="text-center"
                 style={{
-                  display: 'inline-block',
-                  fontSize: '12px',
-                  lineHeight: 1,
-                  letterSpacing: displayName.length <= 2 ? '0.12em' : 'normal',
-                  whiteSpace: 'nowrap',
-                }}
+                display: 'inline-block',
+                fontSize: '13px',
+                lineHeight: 1,
+                letterSpacing: displayName.length <= 2 ? '0.12em' : 'normal',
+                whiteSpace: 'nowrap',
+              }}
               >
                 {displayName}
               </span>
@@ -550,7 +629,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
               <button
                 onClick={handleLaunchAll}
                 disabled={launching || launchCooldown}
-                className={`flex items-center rounded-[6px] text-[11px] font-medium
+                className={`flex items-center rounded-[6px] text-[12px] font-medium
                   bg-primary text-white hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed shrink-0
                   ${(launching || launchCooldown) ? 'gap-1 px-2 py-1' : 'px-2.5 py-1'}`}
                 title={launchCooldown ? '窗口启动中，请稍后' : (isPlaywright ? '一键启动该网点所有未就绪 Chrome 窗口' : '一键启动该网点所有未就绪窗口')}
@@ -589,7 +668,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
 
         {/* 启动提示 — 弹性占位 */}
         {launchMsg && (
-          <span className="text-[11px] text-text-secondary font-mono truncate">
+          <span className="text-[12px] text-text-secondary font-mono truncate">
             {launchMsg}
           </span>
         )}
@@ -606,7 +685,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           <RotateCw className="w-3 h-3" />
         </button>
 
-        <span className="text-[11px] text-text-secondary font-mono">{timeStr}</span>
+        <span className="text-[12px] text-text-secondary font-mono">{timeStr}</span>
       </div>
     </header>
   );

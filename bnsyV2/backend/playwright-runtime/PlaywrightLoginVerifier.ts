@@ -13,6 +13,10 @@
  *       3. button:has-text("登录")
  *       4. button:has-text("立即登录")
  *       5. button[type="submit"]
+ *
+ * Phase 4-E: 登录后弹窗清理
+ *   - 点击登录前注册 dialog handler 自动 accept 原生 alert（如"网点余额低于警戒金额!"）
+ *   - 登录后 20s 等待期间循环执行 PopupManager.dismissAll() 清理 DOM 弹窗
  */
 import type { Page, Cookie } from 'playwright';
 import {
@@ -26,6 +30,7 @@ import {
   type CookieAnalysisResult,
   type SessionDebugInfo,
 } from './types';
+import { PopupManager } from '../browser/PopupManager';
 
 /** 笨鸟速运系统可能使用的 localStorage token key 名（按优先级） */
 const JWT_STORAGE_KEY_CANDIDATES = [
@@ -150,6 +155,11 @@ export class PlaywrightLoginVerifier {
     await passwordInput.fill(cred.password);
     console.log(`${tag} 已填入账号密码: ${cred.account}`);
 
+    // Phase 4-E: 点击登录前注册 dialog handler，自动关闭原生 alert（如"网点余额低于警戒金额!"）
+    const popupMgr = PopupManager.getInstance();
+    popupMgr.register(page);
+    console.log(`${tag} [Popup] 已监听登录后弹窗`);
+
     // 4. 点击登录按钮
     const loginButton = await this.findLoginButton(page);
     if (!loginButton) {
@@ -164,8 +174,22 @@ export class PlaywrightLoginVerifier {
     await loginButton.click();
     console.log(`${tag} 已点击登录按钮，等待跳转...`);
 
-    // 5. 等待跳转
-    const redirected = await this.waitForLoginRedirect(page, 20000);
+    // Phase 4-E: 登录后弹窗清理窗口 — 在等待跳转期间循环清理 DOM 弹窗
+    const jumpStart = Date.now();
+    const jumpTimeout = 20000;
+
+    // 5. 等待跳转（带弹窗清理）
+    const redirected = await Promise.race([
+      this.waitForLoginRedirect(page, jumpTimeout).then(r => r),
+      (async () => {
+        while (Date.now() - jumpStart < jumpTimeout) {
+          await page.waitForTimeout(2000).catch(() => {});
+          await popupMgr.dismissAll(page, { timeout: 3000, maxRounds: 2, verifyAfter: false }).catch(() => {});
+        }
+        return false;
+      })(),
+    ]);
+
     if (!redirected) {
       return {
         success: false,
@@ -185,6 +209,9 @@ export class PlaywrightLoginVerifier {
         console.warn(`${tag} 导航到 /dashboard 失败: ${(e as Error).message}`);
       });
     }
+
+    // Phase 4-E: 登录完成后最终弹窗清理
+    await popupMgr.dismissAll(page, { timeout: 5000, maxRounds: 3, verifyAfter: false }).catch(() => {});
 
     return {
       success: true,

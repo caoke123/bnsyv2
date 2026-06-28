@@ -346,7 +346,7 @@ function TaskDetailDrawer({
             <div className="text-[15px] font-semibold text-text-primary">
               {typeLabelMap[task.type] || task.type} · {task.siteName || task.site}
             </div>
-            <div className="text-[11px] text-text-tertiary font-mono mt-0.5">{formatDate(task.createdAt)}</div>
+            <div className="text-[12px] text-text-tertiary font-mono mt-0.5">{formatDate(task.createdAt)}</div>
             {(() => {
               const parsed = parseInputData(task.inputData);
               if (parsed.executionMode === 'designated') {
@@ -355,9 +355,9 @@ function TaskDetailDrawer({
                 if (task.type === 'sign' && target?.signerPerson) {
                   parts.push(`${target.signerPerson}签收`);
                 }
-                return <div className="text-[11px] text-text-secondary mt-1">{parts.join('｜')}</div>;
+                return <div className="text-[12px] text-text-secondary mt-1">{parts.join('｜')}</div>;
               }
-              return <div className="text-[11px] text-text-secondary mt-1">默认模式｜执行窗口与目标派件员一致</div>;
+              return <div className="text-[12px] text-text-secondary mt-1">默认模式｜执行窗口与目标派件员一致</div>;
             })()}
           </div>
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-btn hover:bg-surface-light text-text-tertiary transition-colors">
@@ -1097,18 +1097,18 @@ export default function TasksPage() {
   const totalPagesValid = totalPages > 0 ? totalPages : 1;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-[1600px] mx-auto">
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-h2 text-text-primary">任务中心</h2>
-          <p className="text-[12px] text-text-tertiary mt-0.5">运营任务控制台 · 共 {taskTotal} 条任务记录</p>
+          <h2 className="text-h1 text-text-primary">任务中心</h2>
+          <p className="text-[14px] text-text-tertiary mt-0.5">运营任务控制台 · 共 {taskTotal} 条任务记录</p>
         </div>
         <div className="flex items-center gap-2">
           <div className="relative">
             <button
               onClick={() => setShowAdminMenu(!showAdminMenu)}
-              className="flex items-center gap-1.5 px-3 h-8 rounded-btn border border-border text-[12px] text-text-secondary hover:bg-surface-light transition-colors"
+              className="flex items-center gap-1.5 px-3 h-8 rounded-btn border border-border text-[13px] text-text-secondary hover:bg-surface-light transition-colors"
             >
               <Settings className="w-3.5 h-3.5" />
               管理工具
@@ -1131,7 +1131,7 @@ export default function TasksPage() {
           <button
             onClick={() => loadTasks()}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 h-8 rounded-btn border border-border text-[12px] text-text-secondary hover:bg-surface-light transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 h-8 rounded-btn border border-border text-[13px] text-text-secondary hover:bg-surface-light transition-colors disabled:opacity-50"
           >
             <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             刷新
@@ -1235,7 +1235,7 @@ export default function TasksPage() {
           { label: '已完成', value: doneCount, color: 'text-success' },
           { label: '已失败', value: failedCount, color: 'text-danger' },
         ].map(card => (
-          <div key={card.label} className="bg-surface border border-border rounded-card px-4 py-2.5 shadow-sm flex items-center justify-between">
+          <div key={card.label} className="bg-surface border border-border rounded-card px-4 py-2.5 shadow-panel flex items-center justify-between">
             <span className="text-[12px] text-text-tertiary font-medium">{card.label}</span>
             <span className={`text-[20px] font-semibold tracking-tight ${card.color}`}>
               {loading ? '-' : card.value}
@@ -1281,7 +1281,7 @@ export default function TasksPage() {
           <select
             value={typeFilter}
             onChange={e => handleTypeChange(e.target.value)}
-            className="appearance-none h-8 pl-8 pr-6 rounded-btn border border-border bg-surface text-[12px] text-text-primary focus:outline-none focus:border-primary/50 cursor-pointer"
+            className="appearance-none h-8 pl-8 pr-6 rounded-btn border border-border bg-surface text-[13px] text-text-primary focus:outline-none focus:border-primary/50 cursor-pointer"
           >
             {TYPE_OPTIONS.map(o => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -1296,7 +1296,7 @@ export default function TasksPage() {
           <select
             value={statusFilter}
             onChange={e => handleStatusChange(e.target.value)}
-            className="appearance-none h-8 pl-8 pr-6 rounded-btn border border-border bg-surface text-[12px] text-text-primary focus:outline-none focus:border-primary/50 cursor-pointer"
+            className="appearance-none h-8 pl-8 pr-6 rounded-btn border border-border bg-surface text-[13px] text-text-primary focus:outline-none focus:border-primary/50 cursor-pointer"
           >
             {STATUS_OPTIONS.map(o => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -1307,14 +1307,14 @@ export default function TasksPage() {
 
         {/* Results count */}
         {!loading && (
-          <span className="text-[11px] text-text-tertiary whitespace-nowrap">
+          <span className="text-[12px] text-text-tertiary whitespace-nowrap">
             共 {total} 条
           </span>
         )}
       </div>
 
       {/* ═══ Task 3: 任务列表 Table（高度跟随数据，分页紧贴底部） ═══ */}
-      <div className="bg-surface border border-border rounded-card shadow-sm overflow-hidden relative">
+      <div className="bg-surface border border-border rounded-card shadow-panel overflow-hidden relative">
         <div className="px-6 pt-5 relative">
           {loading && tasks.length === 0 ? (
             <div className="flex items-center justify-center py-16 text-text-tertiary">
@@ -1339,7 +1339,7 @@ export default function TasksPage() {
               </div>
             </div>
           ) : (
-            <table className="w-full text-[13px] border-separate border-spacing-0">
+            <table className="w-full text-[14px] border-separate border-spacing-0">
               <thead>
                 <tr>
                   {deleteMode && (
@@ -1355,17 +1355,17 @@ export default function TasksPage() {
                       />
                     </th>
                   )}
-                  <th className="px-3 pb-3 pt-1 pl-[15px] text-[11px] font-semibold text-text-tertiary uppercase tracking-wider whitespace-nowrap text-left border-b border-border cursor-pointer hover:text-text-secondary select-none" onClick={() => handleSort('createdAt')}>
+                  <th className="px-3 pb-3 pt-1 pl-[15px] text-[13px] font-semibold text-text-tertiary uppercase tracking-wider whitespace-nowrap text-left border-b border-border cursor-pointer hover:text-text-secondary select-none" onClick={() => handleSort('createdAt')} style={{ width: '150px' }}>
                     <span className="inline-flex items-center gap-1">创建时间 {sortIcon('createdAt')}</span>
                   </th>
-                  <Th onClick={() => handleSort('site')}>网点 {sortIcon('site')}</Th>
-                  <Th onClick={() => handleSort('type')}>任务 {sortIcon('type')}</Th>
-                  <Th align="left">模式</Th>
+                  <Th onClick={() => handleSort('site')} width="100px">网点 {sortIcon('site')}</Th>
+                  <Th onClick={() => handleSort('type')} width="110px">任务 {sortIcon('type')}</Th>
+                  <Th align="left" width="100px">模式</Th>
                   <Th align="left">执行对象</Th>
-                  <Th onClick={() => handleSort('status')}>状态 {sortIcon('status')}</Th>
-                  <Th onClick={() => handleSort('totalCount')} align="right">运单数 {sortIcon('totalCount')}</Th>
-                  <Th onClick={() => handleSort('failCount')} align="right">异常 {sortIcon('failCount')}</Th>
-                  <Th align="right">操作</Th>
+                  <Th onClick={() => handleSort('status')} width="110px">状态 {sortIcon('status')}</Th>
+                  <Th onClick={() => handleSort('totalCount')} align="right" width="90px">运单数 {sortIcon('totalCount')}</Th>
+                  <Th onClick={() => handleSort('failCount')} align="right" width="80px">异常 {sortIcon('failCount')}</Th>
+                  <Th align="right" width="80px">操作</Th>
                 </tr>
               </thead>
               <tbody>
@@ -1392,7 +1392,7 @@ export default function TasksPage() {
                             ? 'bg-[#f0f7ff]'
                             : 'hover:bg-[#fafafa]'
                       }`}
-                      style={{ height: 56 }}
+                      style={{ height: 44 }}
                     >
                       {deleteMode && (
                         <td className="px-2 text-center border-b border-border" onClick={e => e.stopPropagation()}>
@@ -1561,11 +1561,12 @@ export default function TasksPage() {
 
 // ── Table helper components ──
 
-function Th({ children, onClick, align }: { children: React.ReactNode; onClick?: () => void; align?: 'left' | 'right' }) {
+function Th({ children, onClick, align, width }: { children: React.ReactNode; onClick?: () => void; align?: 'left' | 'right'; width?: string }) {
   return (
     <th
-      className={`px-3 pb-3 pt-1 text-[11px] font-semibold text-text-tertiary uppercase tracking-wider whitespace-nowrap border-b border-border ${onClick ? 'cursor-pointer hover:text-text-secondary select-none' : ''} ${align === 'right' ? 'text-right' : 'text-left'}`}
+      className={`px-3 pb-3 pt-1 text-[13px] font-semibold text-text-tertiary uppercase tracking-wider whitespace-nowrap border-b border-border ${onClick ? 'cursor-pointer hover:text-text-secondary select-none' : ''} ${align === 'right' ? 'text-right' : 'text-left'}`}
       onClick={onClick}
+      style={width ? { width } : undefined}
     >
       <span className="inline-flex items-center gap-1">{children}</span>
     </th>

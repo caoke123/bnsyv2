@@ -107,18 +107,22 @@ export class PopupManager {
       console.log(`[PopupManager] dialog.${type}: "${message}" @ ${url}`);
 
       try {
-        await dialog.dismiss();
+        // alert 使用 accept() 点击"确定"；confirm/prompt 使用 dismiss() 取消
         if (type === 'alert') {
+          await dialog.accept();
           this.stats.nativeAlertDismissed++;
+          console.log(`[Popup] 已关闭登录后弹窗：${message}`);
         } else if (type === 'confirm') {
+          await dialog.dismiss();
           this.stats.nativeConfirmDismissed++;
         } else {
+          await dialog.dismiss();
           this.stats.otherDismissed++;
         }
       } catch (e) {
         // "No dialog is showing" — 无害竞争条件，dialog 已自动关闭
         if (!(e as Error).message.includes('No dialog is showing')) {
-          console.warn(`[PopupManager] dialog.dismiss 失败: ${(e as Error).message}`);
+          console.warn(`[PopupManager] dialog 处理失败: ${(e as Error).message}`);
         }
       }
     });
@@ -366,6 +370,10 @@ export class PopupManager {
     if (this.isCloseConfirmation(fullText)) {
       if (await tryClickByText(['确定', '是'])) return true;
     }
+    // Phase 4-G: 兜底 — 对于非确认型弹窗（如余额警告只有"确定"按钮），
+    // 点击"确定"关闭弹窗。确认型弹窗（isCloseConfirmation）已在上方处理。
+    // 这里处理的是 el-message-box / el-dialog 中只有"确定"按钮的简单提示。
+    if (await tryClickByText(['确定'])) return true;
     return false;
   }
 

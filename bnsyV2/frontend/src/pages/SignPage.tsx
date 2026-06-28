@@ -368,7 +368,7 @@ export default function SignPage() {
   };
 
   return (
-    <div style={{ minHeight: '100%', position: 'relative' }}>
+    <div style={{ minHeight: '100%', position: 'relative', maxWidth: '1440px', margin: '0 auto' }}>
 
       <div className={`config-panel ${isRunning ? 'exiting' : ''}`}>
 

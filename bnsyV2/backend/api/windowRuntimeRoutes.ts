@@ -33,9 +33,177 @@ export const windowRuntimeRouter = Router();
 const runtime = PlaywrightRuntime.getInstance();
 const adapter = WindowAdapterRegistry.getInstance().getAdapter();
 
+// ── Phase 4-G: 登录弹窗卡死兜底重启 ──
+// 每个员工最多重启 1 次，超过后返回 failed / login_required
+const loginRetryCount = new Map<string, number>();
+const MAX_LOGIN_RETRIES = 1;
+
+/**
+ * Phase 4-G: 判断是否因弹窗卡住导致登录/P0 失败
+ *
+ * 卡死判定条件（任一满足即判定为卡死）：
+ *   - P0 popup_blocking（弹窗遮罩仍然可见）
+ *   - 登录超时（20s 内未跳转）
+ *   - degraded 且有明确 P0 失败原因
+ */
+function isLoginDeadlocked(
+  p0FailedCheck?: string | null,
+  loginMessage?: string,
+  loginStatus?: string,
+): boolean {
+  if (p0FailedCheck === 'popup_blocking') return true;
+  if (loginMessage?.includes('20s 内未跳转')) return true;
+  if (loginStatus === 'degraded' && p0FailedCheck) return true;
+  return false;
+}
+
+/**
+ * Phase 4-G: 关闭窗口，清除状态，准备重启
+ */
+async function closeWindowForRetry(
+  runtimeKey: string,
+  staffName: string,
+  siteName: string,
+  siteCode: string,
+): Promise<void> {
+  console.log(`[LoginGuard] 尝试关闭窗口并重新启动：${staffName}，第 ${(loginRetryCount.get(staffName) ?? 0) + 1} 次`);
+  // 关闭浏览器窗口
+  await runtime.closeWindow(runtimeKey).catch(e => {
+    console.warn(`[LoginGuard] 关闭窗口异常（忽略继续）: ${(e as Error).message}`);
+  });
+  // 清除重试计数中的旧状态
+  await new Promise(r => setTimeout(r, 800));
+}
+
+/**
+ * Phase 4-G: 执行登录 + P0 守卫 + 弹窗卡死兜底重启
+ *
+ * 流程：
+ *   1. 调用 tryAutoLoginAfterEnsure 登录
+ *   2. 登录成功后跑 P0 检查
+ *   3. 如果因弹窗卡死失败且 retryCount < MAX_LOGIN_RETRIES → 关闭窗口重启一次
+ *   4. 重启后重新执行步骤 1-2
+ *   5. 如果 retries 耗尽或非卡死失败 → 返回 degraded / login_required
+ *
+ * @returns { status, message }
+ */
+async function performLoginWithP0AndRecovery(
+  runtimeKey: string,
+  staffName: string,
+  siteName: string,
+  siteCode: string,
+): Promise<{ status: string; message?: string }> {
+  // 首次登录尝试
+  const loginUpdate = await tryAutoLoginAfterEnsure(
+    { runtimeKey, status: 'login_required', launched: true },
+    staffName,
+    siteName,
+  );
+
+  if (loginUpdate.status !== 'ready') {
+    // 登录失败（如无凭据/密码错误）— 不重启
+    return loginUpdate;
+  }
+
+  // 登录成功，跑 P0 检查
+  console.log(`[playwright-ensure] ${staffName} 登录后状态 ready，触发 P0 守卫检查...`);
+  const p0Report = await runP0CheckSafely(runtimeKey, staffName);
+
+  if (!p0Report || p0Report.passed) {
+    // P0 通过 → 正常返回 ready
+    return { status: 'ready' };
+  }
+
+  // P0 失败 → 判断是否为弹窗卡死
+  if (!isLoginDeadlocked(p0Report.failedCheck, loginUpdate.loginMessage, undefined)) {
+    // 非卡死型失败（如 url_login）→ 不重启，直接返回
+    const failedStatus = p0Report.failedCheck === 'url_login' ? 'login_required' : 'degraded';
+    console.warn(`[playwright-ensure] ${staffName} P0 未通过（非卡死）→ ${failedStatus} (${p0Report.failedCheck})`);
+    return { status: failedStatus, message: `P0 未通过: ${p0Report.failedCheck} - ${p0Report.failedReason}` };
+  }
+
+  // ── 弹窗卡死：检查重试次数 ──
+  const retryCount = loginRetryCount.get(staffName) ?? 0;
+  if (retryCount >= MAX_LOGIN_RETRIES) {
+    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${p0Report.failedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
+    loginRetryCount.delete(staffName);
+    return {
+      status: 'failed',
+      message: `弹窗清理失败，重启后仍未就绪 (${p0Report.failedCheck})`,
+    };
+  }
+
+  // ── 执行重启 ──
+  console.log(`[LoginGuard] 检测到登录后弹窗卡住：${staffName} (${p0Report.failedCheck}: ${p0Report.failedReason})`);
+  loginRetryCount.set(staffName, retryCount + 1);
+
+  // 1. 关闭当前窗口
+  await closeWindowForRetry(runtimeKey, staffName, siteName, siteCode);
+
+  // 2. 重新启动窗口
+  const relaunchResult = await adapter.ensureWindowReady({
+    tenantId: DEFAULT_TENANT_ID,
+    siteId: siteCode,
+    windowId: `staff-${staffName}`,
+    staffName,
+    siteName,
+    windowName: staffName,
+  });
+
+  if (relaunchResult.status !== 'login_required' && relaunchResult.status !== 'opening') {
+    // 重启后状态异常
+    console.error(`[LoginGuard] 重启后窗口状态异常：${staffName}，状态=${relaunchResult.status}`);
+    loginRetryCount.delete(staffName);
+    return { status: 'failed', message: `重启后窗口状态异常: ${relaunchResult.status}` };
+  }
+
+  // 3. 重新登录
+  const retryLoginUpdate = await tryAutoLoginAfterEnsure(
+    { runtimeKey: relaunchResult.runtimeKey, status: relaunchResult.status, launched: relaunchResult.launched },
+    staffName,
+    siteName,
+  );
+
+  if (retryLoginUpdate.status !== 'ready') {
+    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${retryLoginUpdate.status}`);
+    loginRetryCount.delete(staffName);
+    return { status: 'failed', message: `弹窗清理失败，重启后登录仍未就绪` };
+  }
+
+  // 4. 重新跑 P0
+  const retryP0Report = await runP0CheckSafely(relaunchResult.runtimeKey, staffName);
+
+  if (retryP0Report && retryP0Report.passed) {
+    console.log(`[LoginGuard] 重启后 READY 通过：${staffName}`);
+    loginRetryCount.delete(staffName);
+    return { status: 'ready' };
+  }
+
+  // 重启后仍然失败
+  const retryFailedCheck = retryP0Report?.failedCheck ?? 'unknown';
+  console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${retryFailedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
+  loginRetryCount.delete(staffName);
+  return { status: 'failed', message: `弹窗清理失败，重启后仍未就绪 (${retryFailedCheck})` };
+}
+
+/**
+ * Phase 4-G: 安全执行 P0 检查（含异常捕获）
+ */
+async function runP0CheckSafely(
+  runtimeKey: string,
+  staffName: string,
+): Promise<{ passed: boolean; failedCheck: string; failedReason: string; endUrl: string } | null> {
+  try {
+    return await runtime.runP0Check(runtimeKey);
+  } catch (e) {
+    console.error(`[playwright-ensure] ${staffName} P0 检查异常: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 // ── 前端 WindowState 类型对齐（与 frontend/src/api/client.ts 一致） ──
 // 本地定义，避免修改 backend/types/api-contracts.ts
-type WindowState = 'offline' | 'connecting' | 'login_required' | 'connected' | 'ready' | 'busy' | 'degraded';
+type WindowState = 'offline' | 'connecting' | 'login_required' | 'connected' | 'ready' | 'busy' | 'degraded' | 'failed';
 
 /**
  * 将 AdapterWindowStatus 映射为前端 WindowState
@@ -337,13 +505,14 @@ windowRuntimeRouter.post('/api/sites/:siteId/playwright-windows/launch-all', asy
           windowName: target.windowName,
         });
 
-        // Phase 4-B：adapter 不 autoLogin，login_required 时由本路由层触发 manualLogin
-        const loginUpdate = await tryAutoLoginAfterEnsure(
-          { runtimeKey: r.runtimeKey, status: r.status, launched: r.launched },
+        // Phase 4-G：登录 + P0 守卫 + 弹窗卡死兜底重启
+        const loginResult = await performLoginWithP0AndRecovery(
+          r.runtimeKey,
           target.staffName,
           site.name,
+          siteCode,
         );
-        const finalStatus = loginUpdate.status;
+        const finalStatus = loginResult.status;
 
         const isReady = finalStatus === 'ready';
         if (isReady) ready++;
@@ -354,7 +523,7 @@ windowRuntimeRouter.post('/api/sites/:siteId/playwright-windows/launch-all', asy
           runtimeKey: target.runtimeKey,
           status: finalStatus,
           ready: isReady,
-          message: loginUpdate.loginMessage || r.message,
+          message: loginResult.message || r.message,
         });
         console.log(`[playwright-launch-all] ${target.staffName} ensure=${r.status} final=${finalStatus} launched=${r.launched} ready=${isReady}`);
       } catch (e) {
@@ -466,61 +635,51 @@ windowRuntimeRouter.post('/api/sites/:siteId/playwright-windows/ensure', async (
       windowName: w?.windowName,
     });
 
-    // Phase 4-B：adapter 不 autoLogin，login_required 时由本路由层触发 manualLogin
-    const loginUpdate = await tryAutoLoginAfterEnsure(
-      { runtimeKey: result.runtimeKey, status: result.status, launched: result.launched },
-      staffName,
-      site.name,
-    );
-    const finalStatus = loginUpdate.status;
-
-    // ★ Phase 4-B READY 守卫：登录成功后显式触发 P0 检查（确保 ready 状态有 P0 背书）
-    // manualLogin 成功后状态变为 ready，但 P0 未校验，需要显式跑 P0
-    if (finalStatus === 'ready') {
-      console.log(`[playwright-ensure] ${staffName} 登录后状态 ready，触发 P0 守卫检查...`);
-      const p0Report = await runtime.runP0Check(runtimeKey).catch(e => {
-        console.error(`[playwright-ensure] ${staffName} P0 检查异常: ${(e as Error).message}`);
-        return null;
+    // ── Phase 4-G: 登录 + P0 守卫 + 弹窗卡死兜底重启 ──
+    // 先检查 busy 状态（busy 窗口不允许重启）
+    const currentState = runtime.getWindowStateJSON(result.runtimeKey);
+    if (currentState?.status === 'busy') {
+      console.log(`[LoginGuard] ${staffName} 窗口 busy，跳过登录和重启`);
+      return res.json({
+        success: true,
+        runtimeKey: result.runtimeKey,
+        status: 'busy',
+        ready: false,
+        launched: false,
+        currentUrl: currentState.currentUrl,
+        isLoggedIn: currentState.isLoggedIn,
+        message: '窗口正忙，被其他任务占用',
+        runtimeMode: 'playwright' as const,
+        pageCount: currentState.pageCount ?? 0,
+        activePageUrl: currentState.activePageUrl ?? '',
+        p0Passed: currentState.p0Passed ?? false,
+        p0FailedCheck: currentState.p0FailedCheck ?? null,
+        p0FailedReason: currentState.p0FailedReason ?? null,
       });
-      if (p0Report && !p0Report.passed) {
-        // P0 failed → 不返回 ready
-        const failedStatus = p0Report.failedCheck === 'url_login' ? 'login_required' : 'degraded';
-        console.warn(`[playwright-ensure] ${staffName} P0 未通过 → ${failedStatus} (${p0Report.failedCheck})`);
-        // 重新读取 state（runP0Check 已更新诊断字段）
-        const failedState = runtime.getWindowStateJSON(runtimeKey);
-        return res.json({
-          success: false,
-          runtimeKey,
-          status: failedStatus,
-          ready: false,
-          launched: result.launched,
-          currentUrl: p0Report.endUrl,
-          isLoggedIn: false,
-          message: `P0 未通过: ${p0Report.failedCheck} - ${p0Report.failedReason}`,
-          runtimeMode: 'playwright' as const,
-          pageCount: failedState?.pageCount ?? 0,
-          activePageUrl: failedState?.activePageUrl ?? p0Report.endUrl,
-          p0Passed: false,
-          p0FailedCheck: p0Report.failedCheck,
-          p0FailedReason: p0Report.failedReason,
-        });
-      }
     }
 
-    // 读取最新 state（含 P0 诊断字段）
-    const finalState = runtime.getWindowStateJSON(runtimeKey);
+    // Phase 4-G: 登录 + 兜底重启（最多 MAX_LOGIN_RETRIES 次）
+    const loginResult = await performLoginWithP0AndRecovery(
+      result.runtimeKey,
+      staffName,
+      site.name,
+      siteCode,
+    );
 
-    console.log(`[playwright-ensure] staffName=${staffName} ensure=${result.status} final=${finalStatus} launched=${result.launched} ready=${finalStatus === 'ready'} p0Passed=${finalState?.p0Passed ?? false}`);
+    // 读取最新 state（含 P0 诊断字段）
+    const finalState = runtime.getWindowStateJSON(result.runtimeKey);
+
+    console.log(`[playwright-ensure] staffName=${staffName} ensure=${result.status} final=${loginResult.status} launched=${result.launched} ready=${loginResult.status === 'ready'} p0Passed=${finalState?.p0Passed ?? false}`);
 
     res.json({
-      success: finalStatus === 'ready' || finalStatus === 'login_required' || finalStatus === 'busy',
-      runtimeKey,
-      status: finalStatus,
-      ready: finalStatus === 'ready',
+      success: loginResult.status === 'ready' || loginResult.status === 'login_required' || loginResult.status === 'busy',
+      runtimeKey: result.runtimeKey,
+      status: loginResult.status,
+      ready: loginResult.status === 'ready',
       launched: result.launched,
       currentUrl: finalState?.currentUrl ?? result.currentUrl,
       isLoggedIn: finalState?.isLoggedIn ?? result.isLoggedIn,
-      message: loginUpdate.loginMessage || result.message,
+      message: loginResult.message || result.message,
       runtimeMode: 'playwright' as const,
       // ★ Phase 4-B READY 守卫诊断字段
       pageCount: finalState?.pageCount ?? 0,

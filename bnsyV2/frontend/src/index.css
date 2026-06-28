@@ -72,7 +72,7 @@
     background: var(--bg);
     font-family: var(--font);
     color: var(--text-1);
-    font-size: 13px;
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     margin: 0;
@@ -136,13 +136,13 @@
   }
   .panel-icon svg { width: 13px; height: 13px; }
   .panel-title {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-1);
     letter-spacing: -0.01em;
   }
   .panel-sub {
-    font-size: 11.5px;
+    font-size: 13px;
     color: var(--text-3);
     margin-top: 1px;
   }
@@ -174,7 +174,7 @@
     gap: 5px;
     padding: 5px 10px;
     border-radius: var(--r);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-2);
     border: 1px solid var(--border);
@@ -196,7 +196,7 @@
     gap: 5px;
     padding: 5px 10px;
     border-radius: var(--r);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     border: 1px solid var(--border);
     background: var(--surface);
@@ -433,6 +433,13 @@
     color: #c2410c;
   }
 
+  /* ── failed（启动或重启失败）：红色静态边框 ── Phase 4-G */
+  .window-pill.failed {
+    background: color-mix(in srgb, #ef4444 10%, transparent);
+    border-color: color-mix(in srgb, #ef4444 50%, transparent);
+    color: #dc2626;
+  }
+
   /* ── busy（执行中）：橙色走马灯边框，节奏更快 ── */
   .window-pill.busy {
     background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -467,8 +474,8 @@
 
   /* ── pip 状态圆点 ── */
   .window-pill .pip {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
   }
@@ -497,7 +504,7 @@
     border: 1px solid var(--border);
     border-radius: 99px;
     padding: 4px 12px 4px 8px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-2);
     opacity: 0;
     transform: translateY(4px);
@@ -539,9 +546,9 @@
     margin-bottom: 18px;
   }
   .nav-section-title {
-    font-size: 10.5px;
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--text-3);
     padding: 0 8px;
@@ -672,8 +679,8 @@
     padding: 2px 0;
     border-radius: 4px;
     font-family: var(--mono);
-    font-size: 11px;
-    line-height: 1.7;
+    font-size: 13px;
+    line-height: 1.65;
     animation: logIn 0.2s ease forwards;
   }
   .log-line.latest {
@@ -685,8 +692,8 @@
   .log-line.latest .log-lv { font-weight: 700; }
   .log-line.latest .log-msg { color: var(--text-1); font-weight: 500; }
   .log-line.latest .log-msg b { color: var(--text-1); font-weight: 600; }
-  .log-ts { color: var(--text-3); flex-shrink: 0; width: 56px; }
-  .log-lv { font-weight: 500; flex-shrink: 0; width: 28px; font-size: 10px; }
+  .log-ts { color: var(--text-3); flex-shrink: 0; width: 56px; font-size: 12px; }
+  .log-lv { font-weight: 500; flex-shrink: 0; width: 28px; font-size: 11px; }
   .log-msg { color: var(--text-2); flex: 1; }
   .log-msg b { color: var(--text-1); font-weight: 500; }
   .log-progress-bar {
@@ -780,8 +787,8 @@
 
   .page-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; }
   .page-title-wrap { display: flex; align-items: baseline; gap: 12px; }
-  .page-title { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; color: var(--text-1); line-height: 1; }
-  .page-sub { font-size: 12.5px; color: var(--text-3); }
+  .page-title { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; color: var(--text-1); line-height: 1; }
+  .page-sub { font-size: 14px; color: var(--text-3); }
   .page-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
   .workbench {
@@ -839,7 +846,7 @@
   .parse-counts .val { color: var(--text-1); font-weight: 500; }
   .parse-counts .err { color: var(--err); }
   .parse-counts .warn-c { color: var(--warn); }
-  .foot-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--r); font-size: 11px; font-weight: 500; color: var(--text-2); border: 1px solid var(--border); background: var(--surface); cursor: pointer; user-select: none; line-height: 1.4; transition: all 0.12s; box-shadow: 0 1px 2px rgba(0,0,0,0.06), inset 0 1px 0 rgba(255,255,255,0.8); }
+  .foot-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: var(--r); font-size: 13px; font-weight: 500; color: var(--text-2); border: 1px solid var(--border); background: var(--surface); cursor: pointer; user-select: none; line-height: 1.4; transition: all 0.12s; box-shadow: 0 1px 2px rgba(0,0,0,0.06), inset 0 1px 0 rgba(255,255,255,0.8); }
   .foot-btn:hover { border-color: var(--text-3); color: var(--text-1); box-shadow: 0 2px 4px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.8); }
   .foot-btn:active { box-shadow: inset 0 1px 2px rgba(0,0,0,0.08); transform: translateY(1px); }
   .foot-btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; transform: none; }
@@ -902,8 +909,8 @@
   .node-alloc b { color: var(--accent-text); }
   .node-status {
     position: absolute; top: 8px; right: 8px;
-    font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em;
-    padding: 1px 5px; border-radius: 4px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.03em;
+    padding: 2px 6px; border-radius: 4px;
   }
   .node-status.ready { background: var(--ok-soft); color: var(--ok); }
   .node-status.connected { background: var(--brand-soft); color: var(--brand-text); }
@@ -976,7 +983,7 @@
     gap: 5px;
     padding: 6px 12px;
     border-radius: var(--r);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     color: white;
     border: 1px solid var(--brand);
