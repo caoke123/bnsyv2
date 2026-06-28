@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+.next/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# EasyBR archive (binary)
+easybr-asar/
+
+# Archive
+archive/
+
+# Submodule
+bnsy-operator/
+
+# Playwright runtime profiles (user data)
+bnsyV2/backend/runtime/profiles/
+
+# Database files
+*.db
+*.db-journal
+
+# Screenshots
+bnsyV2/backend/screenshots/*.png
+
+# Data
+bnsyV2/data/settings.json
+bnsyV2/data/db.json
+bnsyV2/backend/data/db.json
+
+# Test results
+*.jsonl
+bnsyV2/data/results/
+bnsyV2/backend/data/results/

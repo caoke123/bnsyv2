@@ -1,0 +1,16 @@
+# bnsy-operator-next 开发环境覆盖配置
+#
+# 说明：
+#   - 生产项目 bnsy-operator/ 的 override 会清空 postgres 端口映射（ports: []）
+#   - 新项目 bnsy-operator-next 保留 postgres 端口映射（5435:5432），
+#     因为本地开发时后端通过 127.0.0.1:5435 连接 PG，需要端口暴露
+#   - 此文件保留为空覆盖，避免影响 docker-compose.yml 的默认配置
+services:
+  postgres:
+    # 开发环境保留端口映射，方便本地直连 PG 排查
+    ports:
+      - "5435:5432"
+  redis:
+    # 开发环境保留 Redis 端口映射，方便本地排查
+    ports:
+      - "6380:6379"

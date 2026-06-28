@@ -1,0 +1,100 @@
+version: "3.8"
+
+# ══════════════════════════════════════════════════════════════
+# bnsy-operator-next — DaoPai 下一代网点操作中心
+#
+# 隔离声明（与生产项目 bnsy-operator/ 完全隔离）：
+#   - 容器名前缀: daopai-next-*
+#   - volume 前缀: daopai_next_*
+#   - 数据库: daopai_next（生产为 bnsy_operator）
+#   - PG 端口: 5435（生产为 5434）
+#   - Redis 端口: 6380（生产未启用）
+#   - 应用端口: 3200（生产为 3100）
+#   - runtime 目录: ./runtime/（生产为 ./logs/ + ./screenshots/）
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ────────────────────────────────────────────────────────────
+  # PostgreSQL 16 — DaoPai Next 数据库（daopai_next）
+  # ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: daopai-next-postgres
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: daopai
+      POSTGRES_PASSWORD: daopai_secret
+      POSTGRES_DB: daopai_next
+    volumes:
+      - daopai_next_pgdata:/var/lib/postgresql/data
+      - ./database/schema/init-schema.sql:/docker-entrypoint-initdb.d/01-init-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U daopai -d daopai_next"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  # Redis 7 — 预留：后续会员系统会话/隔离缓存
+  # 当前阶段未接入业务代码，仅启动容器备用
+  # ────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: daopai-next-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - daopai_next_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  # bnsy-operator-next — 应用服务
+  # 后端 Express + Playwright（自带浏览器，不依赖 EasyBR）
+  # ────────────────────────────────────────────────────────────
+  bnsy-operator-next:
+    build: .
+    container_name: daopai-next-app
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      # PostgreSQL 连接（daopai_next）
+      - PG_HOST=127.0.0.1
+      - PG_PORT=5435
+      - PG_USER=daopai
+      - PG_PASSWORD=daopai_secret
+      - PG_DATABASE=daopai_next
+      - PG_POOL_MAX=20
+      # Redis 连接（预留）
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6380
+      # CDP 调试端口（legacy EasyBR 模式预留，新项目默认不使用）
+      - CDP_PORTS=
+      # legacy: EasyBR API（新项目不依赖，保留环境变量供 legacy 代码兜底）
+      - EASYBR_API=http://127.0.0.1:3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+# ────────────────────────────────────────────────────────────
+# 命名卷：与生产项目完全隔离（daopai_next_* 前缀）
+# ────────────────────────────────────────────────────────────
+volumes:
+  daopai_next_pgdata:
+    name: daopai_next_pgdata
+  daopai_next_redisdata:
+    name: daopai_next_redisdata
