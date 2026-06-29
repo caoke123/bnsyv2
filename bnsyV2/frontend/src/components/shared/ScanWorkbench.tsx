@@ -8,8 +8,16 @@ import { submitTask } from '../../api/client';
 import { useWindowState } from '../shared/WindowStateProvider';
 import { useTaskExecution } from '../shared/TaskExecutionContext';
 import { useRuntimeMode } from '../shared/RuntimeModeProvider';
-import type { WindowState } from '../../api/client';
+import type { PlaywrightSiteWindowState } from '../../api/client';
 import { buildAssignments } from '../../lib/assignment-builder';
+import {
+  getWindowDisplayStatus,
+  canSelectAsExecutionWindow,
+  getNodeBadge,
+  getNodeCardClass,
+  getNodeStatusText,
+  type DisplayStatus,
+} from '../../lib/window-status';
 
 /** 项目支持的签收人选项（与后端 SUPPORTED_SIGNERS 保持一致） */
 const SUPPORTED_SIGNERS = [
@@ -36,6 +44,19 @@ export interface ScanWorkbenchProps {
 // 运单解析防抖延迟
 const PARSE_DEBOUNCE_MS = 300;
 
+/**
+ * 目标派件员能力判断（语义等价于后端 SettingsManager.isTargetableEmployee）
+ * 只要 employeeName + username 非空即可，不要求 password / easybrBrowserId / 窗口状态。
+ * 仅用于"目标派件员下拉框"，不用于"执行窗口"判断。
+ */
+function isTargetableEmployee(w: { employeeName?: string; username?: string } | undefined | null): boolean {
+  return !!(
+    w &&
+    String(w.employeeName || '').trim() &&
+    String(w.username || '').trim()
+  );
+}
+
 const WINDOW_COLORS = ['#0060FF', '#009951', '#E68A00', '#8A3FFC', '#E02433', '#2563EB', '#DB6B2E', '#0EA5E9'];
 function getWindowColor(name: string): string {
   let hash = 0;
@@ -53,13 +74,6 @@ function generateMagicWaybills(count: number = 50): string {
   return waybills.join('\n');
 }
 
-interface WorkerNode {
-  employeeName: string;
-  windowName: string;
-  browserId: string | null;
-  status: WindowState;
-}
-
 function formatTime(ts: number): string {
   const d = new Date(ts);
   const p = (n: number) => String(n).padStart(2, '0');
@@ -71,7 +85,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── 统一窗口状态（来自 WindowStateProvider） ──
-  const { activeSiteId, sites, siteWindows: ctxWindows, siteName, fetchError: ctxFetchError } = useWindowState();
+  const { activeSiteId, sites, siteWindows: ctxWindows, siteName, fetchError: ctxFetchError, isPlaywright } = useWindowState();
 
   // ── 运行模式（Phase 9-dryrun） ──
   const { dryRunMode } = useRuntimeMode();
@@ -79,9 +93,9 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   // Phase 9.1: 真实执行模式启动二次确认
   const [showRealModeConfirm, setShowRealModeConfirm] = useState(false);
 
-  // ★ 兼容旧的 WorkerNode 格式（过滤掉无 employeeName 的窗口）
-  const siteWindows: WorkerNode[] = useMemo(
-    () => ctxWindows.filter(w => w.employeeName).map(w => ({ ...w })),
+  // ★ Phase 4-I-1: 使用 PlaywrightSiteWindowState 保留诊断字段（p0Passed/pageCount 等）
+  const siteWindows: PlaywrightSiteWindowState[] = useMemo(
+    () => ctxWindows.filter(w => w.employeeName),
     [ctxWindows],
   );
   
@@ -121,22 +135,36 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
 
   // ── Phase 1: 账号查找表（employeeName → username） ──
   // 从 sites 配置中查找当前站点员工的账号信息
+  const activeSiteConfig = useMemo(
+    () => sites.find(s => s.id === activeSiteId),
+    [sites, activeSiteId],
+  );
+
   const usernameByEmployee = useMemo(() => {
     const map: Record<string, string> = {};
-    const activeSite = sites.find(s => s.id === activeSiteId);
-    activeSite?.windows.forEach(w => {
+    activeSiteConfig?.windows.forEach(w => {
       if (w.employeeName) {
         map[w.employeeName] = w.username || '';
       }
     });
     return map;
-  }, [sites, activeSiteId]);
+  }, [activeSiteConfig]);
 
   // 当前站点可选派件员列表（用于指定模式的目标派件员下拉框）
-  const courierOptions = useMemo(
-    () => siteWindows.map(w => w.employeeName).filter(Boolean) as string[],
-    [siteWindows],
-  );
+  // ★ Phase 4-C 修复: 目标派件员数据源来自 settings 配置（isTargetableEmployee：employeeName + username），
+  //   不再复用 siteWindows（窗口状态列表，会被后端 isLoginCapableWindow 过滤掉无密码员工）。
+  //   执行窗口仍使用 siteWindows + canSelectAsExecutionWindow，二者分离。
+  const courierOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const w of activeSiteConfig?.windows ?? []) {
+      if (!isTargetableEmployee(w)) continue;
+      if (seen.has(w.employeeName)) continue;
+      seen.add(w.employeeName);
+      result.push(w.employeeName);
+    }
+    return result;
+  }, [activeSiteConfig]);
 
   // 指定模式下：当前选中的执行窗口
   const designatedWindow = executionMode === 'designated' && selectedWorkers.length === 1
@@ -268,9 +296,9 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     }
   }, [liveStatus]);
 
-  const toggleWorker = useCallback((name: string, nodeStatus: WorkerNode['status']) => {
+  const toggleWorker = useCallback((name: string, displayStatus: DisplayStatus) => {
     if (liveStatus === 'running') return;
-    if (nodeStatus !== 'ready') return;
+    if (!canSelectAsExecutionWindow(displayStatus)) return;
     setSelectedWorkers(prev => {
       // Phase 1: 指定模式下，单选 — 点击新员工时替换原选择
       if (executionMode === 'designated') {
@@ -310,9 +338,12 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   }, [executionMode, selectedWorkers, liveStatus]);
 
   const selectAllOnline = useCallback(() => {
-    const ready = siteWindows.filter(w => w.status === 'ready').map(w => w.employeeName);
+    // Phase 4-I-1: 使用统一 displayStatus 判断 ready
+    const ready = siteWindows
+      .filter(w => getWindowDisplayStatus(w, { isPlaywright, isInitializing: false }) === 'ready')
+      .map(w => w.employeeName);
     setSelectedWorkers(ready);
-  }, [siteWindows]);
+  }, [siteWindows, isPlaywright]);
 
   const handleMagicFill = () => {
     handleInputChange(generateMagicWaybills(50));
@@ -383,43 +414,8 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const colsClass = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
 
-  const getStatusBadge = (s: WorkerNode['status']) => {
-    switch (s) {
-      case 'ready': return { cls: 'ready', label: 'READY' };
-      case 'login_required': return { cls: 'login-req', label: 'LOGIN' };
-      case 'connecting': return { cls: 'connected', label: 'INIT' };
-      case 'connected': return { cls: 'connected', label: 'CONN' };
-      case 'busy': return { cls: 'busy', label: 'BUSY' };
-      case 'degraded': return { cls: 'busy', label: 'WARN' };
-      default: return { cls: 'offline-s', label: 'OFF' };
-    }
-  };
-
-  const getCardClass = (s: WorkerNode['status'], isSel: boolean) => {
-    const classes = ['node-card'];
-    if (isSel) classes.push('selected');
-    if (s === 'offline') classes.push('offline-card');
-    if (s === 'busy') classes.push('busy-card');
-    if (s === 'degraded') classes.push('busy-card');
-    if (s === 'login_required') classes.push('login-required-card');
-    return classes.join(' ');
-  };
-
-  const getAllocText = (node: WorkerNode, isSel: boolean, alloc: number) => {
-    if (isSel) {
-      if (alloc > 0) return <b>{alloc} 单</b>;
-      return <span style={{ color: 'var(--accent)' }}>已选择</span>;
-    }
-    switch (node.status) {
-      case 'ready': return '点击选择';
-      case 'login_required': return '待登录';
-      case 'connecting': return '启动中...';
-      case 'connected': return '初始化中';
-      case 'busy': return '执行中';
-      case 'degraded': return '不稳定';
-      default: return '离线';
-    }
-  };
+  // Phase 4-I-1: getStatusBadge / getCardClass / getAllocText 已迁移到 lib/window-status.ts
+  // 使用 getNodeBadge / getNodeCardClass / getNodeStatusText 替代
 
   return (
     <div style={{ minHeight: '100%', position: 'relative', maxWidth: '1440px', margin: '0 auto' }}>
@@ -584,7 +580,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                 </div>
               </div>
               <span className="panel-badge">
-                已选 {selectedWorkers.length} / {executionMode === 'designated' ? 1 : siteWindows.filter(w => w.status === 'ready').length}
+                已选 {selectedWorkers.length} / {executionMode === 'designated' ? 1 : siteWindows.filter(w => getWindowDisplayStatus(w, { isPlaywright, isInitializing: false }) === 'ready').length}
               </span>
             </div>
 
@@ -620,17 +616,25 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                     const isSel = selectedWorkers.includes(w.employeeName);
                     const alloc = isSel ? (allocations[w.employeeName] || 0) : 0;
                     const color = getWindowColor(w.employeeName);
-                    const badge = getStatusBadge(w.status);
+                    // Phase 4-I-1: 统一使用 getWindowDisplayStatus 计算 displayStatus
+                    const ds = getWindowDisplayStatus(w, { isPlaywright, isInitializing: false });
+                    const badge = getNodeBadge(ds);
+                    const canSelect = canSelectAsExecutionWindow(ds);
                     return (
                       <div
                         key={w.employeeName}
-                        className={getCardClass(w.status, isSel)}
-                        onClick={() => toggleWorker(w.employeeName, w.status)}
+                        className={getNodeCardClass(ds, isSel)}
+                        onClick={() => canSelect && toggleWorker(w.employeeName, ds)}
+                        style={canSelect ? {} : { cursor: 'not-allowed' }}
                       >
                         <div className={`node-status ${badge.cls}`}>{badge.label}</div>
                         <div className="node-avatar" style={{ background: color }}>{w.employeeName[0]}</div>
                         <div className="node-name">{w.employeeName}</div>
-                        <div className="node-alloc">{getAllocText(w, isSel, alloc)}</div>
+                        <div className="node-alloc">
+                          {isSel ? (
+                            alloc > 0 ? <b>{alloc} 单</b> : <span style={{ color: 'var(--accent)' }}>已选择</span>
+                          ) : getNodeStatusText(ds)}
+                        </div>
                         <div className="check-mark">
                           <svg viewBox="0 0 10 10" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="1.5,5 4,7.5 8.5,2.5" />

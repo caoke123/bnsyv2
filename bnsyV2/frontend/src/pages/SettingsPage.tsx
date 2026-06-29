@@ -822,6 +822,22 @@ export default function SettingsPage() {
       <PageHeader
         title="设置中心"
         description="管理网点、员工窗口和登录凭据"
+        className="items-end"
+        actions={
+          <>
+            <ActionButton variant="ghost" onClick={handleReset} disabled={!dirty}>
+              放弃更改
+            </ActionButton>
+            <ActionButton
+              variant="primary"
+              onClick={handleSaveClick}
+              disabled={!dirty}
+              icon={<Lock className="w-4 h-4" />}
+            >
+              保存配置
+            </ActionButton>
+          </>
+        }
       />
 
       {/* ── 站点 Tabs ── */}
@@ -1277,21 +1293,6 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
-
-      {/* ── 底部操作栏 ── */}
-      <div className="flex items-center justify-end gap-3">
-        <ActionButton variant="ghost" onClick={handleReset} disabled={!dirty}>
-          放弃更改
-        </ActionButton>
-        <ActionButton
-          variant="primary"
-          onClick={handleSaveClick}
-          disabled={!dirty}
-          icon={<Lock className="w-4 h-4" />}
-        >
-          保存配置
-        </ActionButton>
-      </div>
 
       {/* ── PIN Modal ── */}
       <PinModal

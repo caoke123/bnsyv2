@@ -14,28 +14,23 @@ import {
   reconnectEasyBR,
   type SiteWindowState,
   type PlaywrightSiteWindowState,
-  type WindowState,
 } from '../../api/client';
 import { useWindowState } from '../shared/WindowStateProvider';
 import { useTaskExecution } from '../shared/TaskExecutionContext';
+import {
+  getWindowDisplayStatus,
+  canCloseWindow,
+  getWindowStatusLabel,
+  getWindowKey,
+  type DisplayStatus,
+} from '../../lib/window-status';
 
-// ═══════ VERSION: v7 — Phase 4-B READY 守卫（收紧 READY 定义） ═══════
-// playwright 模式：READY 必须满足 p0Passed===true && pageCount===1 && URL 是 bnsy dashboard
-//   若 status='ready' 但 P0 未通过/多标签页/about:blank → 显示 "不稳定"（degraded 橙色）
+// ═══════ VERSION: v9 — Phase 4-I-3 统一 launch / launch-all 状态流 ═══════
+// Phase 4-I-1: 统一窗口状态 Helper（getWindowDisplayStatus）
+// Phase 4-I-2: 统一 close 事务（clearRuntimeStateForClose）
+// Phase 4-I-3: initializingTasks key 改用 getWindowKey(siteId, employeeName)
+//             单窗口/一键启动/close 清理/TTL 清理统一使用 windowKey
 // legacy_easybr 模式：保留原 GET /api/sites/:siteId/windows + EasyBR 启动逻辑
-
-/** Phase 4-B：playwright 模式下的真实 READY 判断（10 项条件收严） */
-function isPlaywrightReallyReady(sw: PlaywrightSiteWindowState): boolean {
-  if (sw.status !== 'ready') return false;
-  if (sw.p0Passed !== true) return false;
-  if (sw.pageCount !== 1) return false;
-  const url = sw.currentUrl ?? sw.activePageUrl ?? '';
-  if (!url) return false;
-  if (url === 'about:blank') return false;
-  if (!url.includes('bnsy.benniaosuyun.com')) return false;
-  if (url.includes('/login')) return false;
-  return true;
-}
 
 interface HeaderProps {
   sidebarCollapsed?: boolean;
@@ -56,12 +51,58 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   // ★ P0 安全加固：任务运行中禁止切换站点，防止 UI 当前站点与运行中任务错位
   const { liveStatus } = useTaskExecution();
 
-  // ── 初始化中窗口映射 (windowName → taskId) ──
+  // ── 初始化中窗口映射 (windowKey → marker/taskId) ──
+  // Phase 4-I-3: key 统一使用 getWindowKey(activeSiteId, employeeName) = `${siteId}:${employeeName}`
+  //   - 消除跨站点同名员工串扰
+  //   - 单窗口/一键启动/close 清理/TTL 清理统一使用同一 key
   const [showSiteSwitcher, setShowSiteSwitcher] = useState(false);
   const [initializingTasks, setInitializingTasks] = useState<Map<string, string>>(new Map());
   const [launching, setLaunching] = useState(false);
   const [launchMsg, setLaunchMsg] = useState('');
   const [reconnecting, setReconnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // 手动点击刷新按钮：带 loading 视觉反馈
+  // 最小显示 400ms，避免请求太快导致旋转动画一闪而过无法感知
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        fetchSiteWindows(),
+        new Promise(resolve => setTimeout(resolve, 400)),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshing, fetchSiteWindows]);
+
+  // ── Phase 4-I-3: 统一 windowKey 与 mark/clear 辅助函数 ──
+  //   单窗口启动 / 一键启动 / close 清理 都调用同一组函数，避免 key 不一致
+  const getWindowKeyForSw = useCallback((sw: SiteWindowState): string => {
+    const staffName = sw.employeeName || sw.windowName;
+    return getWindowKey(activeSiteId, staffName);
+  }, [activeSiteId]);
+
+  const markInitializing = useCallback((sw: SiteWindowState, marker: string) => {
+    const key = getWindowKeyForSw(sw);
+    setInitializingTasks(prev => {
+      if (prev.get(key) === marker) return prev;
+      const next = new Map(prev);
+      next.set(key, marker);
+      return next;
+    });
+  }, [getWindowKeyForSw]);
+
+  const clearInitializing = useCallback((sw: SiteWindowState) => {
+    const key = getWindowKeyForSw(sw);
+    setInitializingTasks(prev => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  }, [getWindowKeyForSw]);
 
   // ── Phase 4-D: 悬浮窗口名（用于显示关闭按钮）──
   const [hoveredWindow, setHoveredWindow] = useState<string | null>(null);
@@ -73,23 +114,24 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   const [launchCooldown, setLaunchCooldown] = useState(false);
 
   // ── 轮询初始化中任务状态（仅以task.status为依据，不做前端超时熔断） ──
-  // playwright 模式的 'pw-ensure' 条目为同步 ensure 调用，不走任务轮询
+  // playwright 模式的 'pw-ensure' / 'pw-launch-all' 条目为同步 ensure 调用，不走任务轮询
   const pollInitTasks = useCallback(async () => {
     if (initializingTasks.size === 0) return;
 
     const pending = new Map(initializingTasks);
 
-    for (const [windowName, taskId] of pending) {
+    for (const [key, taskId] of pending) {
       if (!taskId) continue;
-      // playwright 模式单窗口 ensure 不产生 taskId，跳过轮询（由 finally 块清除标记）
+      // playwright 模式单窗口 ensure / launch-all 不产生 taskId，跳过轮询（由 handler 显式清除标记）
       if (taskId.startsWith('pw-')) continue;
 
       try {
         const progress = await getTaskProgress(taskId);
         if (progress.status === 'done' || progress.status === 'failed' || progress.status === 'cancelled') {
           setInitializingTasks(prev => {
+            if (!prev.has(key)) return prev;
             const next = new Map(prev);
-            next.delete(windowName);
+            next.delete(key);
             return next;
           });
           fetchSiteWindows();
@@ -105,35 +147,44 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     };
   }, [pollInitTasks]);
 
-  // ★ Phase 4-F: TTL 自动释放 — 当 siteWindows 更新时清理 stale initializingTasks
-  //   区分两类标记：
-  //   (a) pw-ensure / pw-launch-all — 由 handler 显式清理，TTL 不干预（保护活跃启动）
-  //   (b) legacy taskId / 空标记    — old EasyBR 路径，TTL 在终端状态时清理
-  //   offline 无条件清理（窗口已关闭，任何标记均应清除）
+  // ★ Phase 4-I-3: TTL 自动释放 — 当 siteWindows 更新时清理 stale initializingTasks
+  //   统一规则（不再区分 pw- / legacy）：
+  //   - offline → 总是清理（窗口已关闭）
+  //   - 后端终态（ready/busy/login_required/failed/degraded）→ 立即清理
+  //     * 实现一键启动"先 ready 先变绿"：后端终态优先于 initializing 标记
+  //     * getWindowDisplayStatus 的优先级已保证 UI 显示终态，这里清理是状态卫生
+  //   - pw-ensure 标记也在此清理，避免 handleInitWindow 异常路径遗漏
   useEffect(() => {
-    setInitializingTasks(prev => {
-      if (prev.size === 0) return prev;
-      let changed = false;
-      const next = new Map(prev);
-      for (const windowName of prev.keys()) {
-        const marker = prev.get(windowName) ?? '';
-        const sw = siteWindows.find(w => w.windowName === windowName);
-        if (!sw) continue; // 窗口已从配置中移除
+    if (initializingTasks.size === 0) return;
+    let changed = false;
+    const next = new Map(initializingTasks);
+    for (const sw of siteWindows) {
+      const key = getWindowKeyForSw(sw);
+      if (!next.has(key)) continue;
+      const marker = next.get(key) ?? '';
 
-        // offline — 总是清理（窗口已关闭）
-        if (sw.status === 'offline') {
-          next.delete(windowName);
-          changed = true;
-        }
-        // ready/busy — 只清理 legacy 非 pw- 标记（pw- 标记由 handleInitWindow/handleLaunchAll 显式清理）
-        else if ((sw.status === 'ready' || sw.status === 'busy') && !marker.startsWith('pw-')) {
-          next.delete(windowName);
-          changed = true;
-        }
+      // offline — 总是清理（窗口已关闭）
+      if (sw.status === 'offline') {
+        next.delete(key);
+        changed = true;
+        continue;
       }
-      return changed ? next : prev;
-    });
-  }, [siteWindows]);
+      // 后端终态 → 立即清理（实现逐个窗口独立释放）
+      if (sw.status === 'ready' || sw.status === 'busy' ||
+          sw.status === 'login_required' || sw.status === 'failed' ||
+          sw.status === 'degraded') {
+        next.delete(key);
+        changed = true;
+        continue;
+      }
+      // legacy 空 marker 在 connecting 状态也清理（无 taskId 可轮询）
+      if (!marker && sw.status === 'connecting') {
+        next.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) setInitializingTasks(next);
+  }, [siteWindows, initializingTasks, getWindowKeyForSw]);
 
   // ── 时钟 ──
   useEffect(() => {
@@ -161,54 +212,16 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   const activeSite = sites.find(s => s.id === activeSiteId);
   const displaySiteName = activeSite?.name || siteName || activeSiteId;
 
-  // ── 获取单个窗口的显示状态（考虑初始化中 + Phase 4-B READY 守卫） ──
-  // playwright 模式下：若 status='ready' 但 P0 未通过/多标签页/about:blank
-  //   → 降级显示 'degraded'（橙色"不稳定"），避免误判为可执行
-  //
-  // ★ Phase 4-D-Fix2 优先级调整：
-  //   执行节点（ScanWorkbench/SignPage）直接使用 w.status，不检查 initializingTasks
-  //   Header 之前用 initializingTasks 覆盖 w.status，导致两者显示不一致
-  //   修复：后端 READY > 本地 initializing（后端是权威源，本地 initializing 只用于非 ready 态）
-  // ★ Phase 4-F: 统一 getEffectiveStatus
-  //   优先级：busy > 本地 initializing > 后端 ready/P0 > 其他后端状态
-  //   busy 最高（安全）：任务运行中禁止误操作
-  //   本地 initializing 次高：确保点击启动后立即有蓝色 loading 反馈
-  //   后端 ready 需 P0 守卫检查通过才是真 ready，否则降级
-  // ★ Phase 4-H: 后端终态覆盖 initializing
-  //   一键启动时，先完成的员工后端已 ready/login_required/failed/degraded，
-  //   initializing 不应再覆盖，应立即显示终态。只有 backend 为过渡态
-  //   (connecting/connected/offline) 时 initializing 才生效。
-  const getEffectiveStatus = (w: SiteWindowState): WindowState | 'initializing' => {
-    // busy 最高优先级 — 执行中不允许任何覆盖
-    if (w.status === 'busy') return 'busy';
-
-    // ★ Phase 4-H: 后端终态优先 — initializing 仅在后端为过渡态时生效
-    //   终态：ready / login_required / failed / degraded → 直接显示
-    //   过渡态：connecting / connected / offline → 保留 initializing 蓝 loading
-    const backendTerminal = w.status === 'ready' || w.status === 'login_required'
-      || w.status === 'failed' || w.status === 'degraded';
-
-    if (initializingTasks.has(w.windowName) && !backendTerminal) {
-      return 'initializing';
-    }
-
-    // 后端 ready → P0 守卫降级检查
-    if (w.status === 'ready') {
-      if (isPlaywright) {
-        const pw = w as PlaywrightSiteWindowState;
-        if (!isPlaywrightReallyReady(pw)) {
-          const url = pw.currentUrl ?? pw.activePageUrl ?? '';
-          if (url.includes('/login') || pw.p0FailedCheck === 'url_login') {
-            return 'login_required';
-          }
-          return 'degraded';
-        }
-      }
-      return 'ready';
-    }
-
-    // 其余后端状态原样返回（offline / connecting / login_required / degraded / failed）
-    return w.status;
+  // ── 获取单个窗口的显示状态 ──
+  // Phase 4-I-1: 统一使用 lib/window-status.ts 的 getWindowDisplayStatus
+  //   优先级：busy > 后端终态 > initializing（仅过渡态）> connecting > offline
+  //   ready 经 isPlaywrightReallyReady 守卫降级
+  // Phase 4-I-3: initializingTasks key 已统一为 getWindowKey(siteId, employeeName)
+  const getEffectiveStatus = (w: SiteWindowState): DisplayStatus => {
+    return getWindowDisplayStatus(w, {
+      isPlaywright,
+      isInitializing: initializingTasks.has(getWindowKeyForSw(w)),
+    });
   };
 
   // ── 单点初始化窗口 ──
@@ -217,16 +230,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
 
     // playwright 模式：走 adapter.ensureWindowReady（headed=true, keepOpen=true）
     if (isPlaywright) {
-      // ★ Phase 4-D-Polish: 清除标记的辅助函数
-      const clearInitMark = () => {
-        setInitializingTasks(prev => {
-          const next = new Map(prev);
-          next.delete(sw.windowName);
-          return next;
-        });
-      };
-
-      setInitializingTasks(prev => new Map(prev).set(sw.windowName, 'pw-ensure'));
+      markInitializing(sw, 'pw-ensure');
       try {
         const res = await ensurePlaywrightWindow(activeSiteId, staffName);
         setLaunchMsg(
@@ -236,14 +240,14 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           : res.status === 'failed' ? `弹窗清理失败：${staffName}`
           : `启动中：${staffName} (${res.status})`,
         );
-        // Phase 4-D-Polish: 先清除初始化标记，再拉取最新状态
+        // 先清除初始化标记，再拉取最新状态
         // 否则 getEffectiveStatus 会把 ready 的窗口覆盖为 'initializing'
-        clearInitMark();
+        clearInitializing(sw);
         await fetchSiteWindows();
       } catch (e) {
         console.error(`[playwright-ensure] ${sw.windowName} 启动失败:`, e);
         setLaunchMsg(`Chrome 启动失败 ${staffName}: ${(e as Error).message}`);
-        clearInitMark();
+        clearInitializing(sw);
       }
       return;
     }
@@ -253,17 +257,13 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
       setLaunchMsg(`窗口 ${staffName} 未匹配到EasyBR浏览器配置，请先在EasyBR中创建对应浏览器窗口`);
       return;
     }
-    setInitializingTasks(prev => new Map(prev).set(sw.windowName, ''));
+    markInitializing(sw, '');
     try {
       const res = await initWindow(activeSiteId, sw.browserId);
-      setInitializingTasks(prev => new Map(prev).set(sw.windowName, res.taskId));
+      markInitializing(sw, res.taskId);
     } catch (e) {
       console.error(`初始化窗口 ${sw.windowName} 失败:`, e);
-      setInitializingTasks(prev => {
-        const next = new Map(prev);
-        next.delete(sw.windowName);
-        return next;
-      });
+      clearInitializing(sw);
       setLaunchMsg(`窗口 ${sw.employeeName} 启动失败: ${(e as Error).message}`);
     }
   };
@@ -278,27 +278,23 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     setLaunching(true);
     setLaunchMsg('');
 
-    // ★ Phase 4-F: 标记所有待启动窗口为启动中（蓝色 loading）
-    //   确保逐窗口 pill 在 launch-all 期间也有 loading 反馈
+    // ★ Phase 4-I-3: 标记所有待启动窗口为启动中（蓝色 loading）
+    //   使用统一 markInitializing（windowKey），与单窗口启动同源
+    //   TTL 清理会在各窗口后端进入终态时逐个清理标记，实现"先 ready 先变绿"
     const launchTargets = isPlaywright
       ? siteWindows.filter(w => w.status === 'offline' || w.status === 'degraded' || w.status === 'login_required')
       : siteWindows.filter(w => w.status === 'offline');
-    if (launchTargets.length > 0) {
-      setInitializingTasks(prev => {
-        const next = new Map(prev);
-        launchTargets.forEach(w => next.set(w.windowName, 'pw-launch-all'));
-        return next;
-      });
-    }
+    launchTargets.forEach(w => markInitializing(w, 'pw-launch-all'));
 
-    // ★ Phase 4-F: pw- 标记清理辅助函数
+    // ★ Phase 4-I-3: 统一清理所有 pw-launch-all 标记（兜底）
+    //   正常情况下 TTL 清理已逐个清理，这里处理 API 返回后的残留
     const clearLaunchMarks = () => {
       setInitializingTasks(prev => {
         let changed = false;
         const next = new Map(prev);
-        for (const [windowName, marker] of prev) {
+        for (const [key, marker] of prev) {
           if (marker === 'pw-launch-all') {
-            next.delete(windowName);
+            next.delete(key);
             changed = true;
           }
         }
@@ -313,10 +309,10 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
         ? await launchAllPlaywrightWindows(activeSiteId)
         : await launchAllWindows(activeSiteId);
       setLaunchMsg(res.message);
-      // Phase 4-D-Polish: await 确保状态立即同步，不等下一轮 polling
+      // await 确保状态立即同步，不等下一轮 polling
       await fetchSiteWindows();
 
-      // ★ Phase 4-F: 启动完成 → 清理所有 launch-all 标记
+      // 启动完成 → 清理所有残留 launch-all 标记
       clearLaunchMarks();
 
       if (res.timeout || (res.failed === 0 && res.partial > 0 && res.launched === 0)) {
@@ -340,7 +336,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
       const msg = (e as Error).message || '请求失败';
       setLaunchMsg(`启动失败: ${msg}`);
       console.error('[Header] 一键启动失败:', e);
-      // ★ Phase 4-F: 异常时也清理标记
+      // 异常时也清理标记
       clearLaunchMarks();
       setLaunchCooldown(true);
       launchCooldownRef.current = setTimeout(() => {
@@ -374,7 +370,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     }
   };
 
-  // ── 关闭窗口（优雅关闭，设置manuallyClosed标记） ──
+  // ── 关闭窗口 — Phase 4-I-2 close 事务 + Phase 4-I-3 统一 windowKey ──
   const handleCloseWindow = async (sw: SiteWindowState, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -385,7 +381,9 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
         if (!sw.browserId) return;
         await toggleWindow(sw.browserId);
       }
-      // Phase 4-D-Polish: await 确保状态立即同步，不等下一轮 polling
+      // Phase 4-I-3: 使用统一 clearInitializing（windowKey）清理标记
+      clearInitializing(sw);
+      // await 确保状态立即同步，不等下一轮 polling
       await fetchSiteWindows();
     } catch (err) {
       console.error('[Header] 关闭窗口失败:', err);
@@ -394,39 +392,17 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     }
   };
 
-  // ── 状态 → 颜色映射 ──
-  // ★ Phase 4-F 语义收束：
-  //   offline:        灰色  — 未启动
-  //   connecting:     蓝色脉冲 — 后端正在启动/登录中（Playwright launching/logging_in → opening → connecting）
-  //   connected:      蓝色脉冲 — EasyBR 窗口已打开但 P0 未验证（legacy 模式）
-  //   initializing:   蓝色脉冲 — 前端本地标记，用户刚点击启动
-  //   ready:          绿色  — P0 / READY 通过
-  //   busy:           橙色走马灯 — 执行中
-  //   login_required: 黄色  — 需人工登录
-  //   degraded:       橙红  — 连接异常 / P0 未通过 / 不稳定
-  //   failed:         红色  — 启动或检测失败
-  const statusColor: Record<string, string> = {
+  // ── 状态 → 颜色映射（Phase 4-I-1: 基于 DisplayStatus） ──
+  //   颜色语义与 lib/window-status.ts 的 getWindowStatusTone 一致
+  const statusColor: Record<DisplayStatus, string> = {
     offline: 'bg-text-tertiary',
     connecting: 'bg-primary animate-pulse',
     login_required: 'bg-yellow-500',
-    connected: 'bg-primary animate-pulse',
     ready: 'bg-success',
     busy: 'bg-warning',
     degraded: 'bg-orange-500',
     initializing: 'bg-primary animate-pulse',
     failed: 'bg-red-500',
-  };
-
-  const statusLabel: Record<string, string> = {
-    offline: '离线',
-    connecting: '启动中',
-    login_required: '待登录',
-    connected: '启动中',
-    ready: '就绪',
-    busy: '执行中',
-    degraded: '不稳定',
-    initializing: '启动中',
-    failed: '失败',
   };
 
   // ── 渲染 ──
@@ -521,7 +497,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           return (
             <span
               key={sw.windowName}
-              className={`window-pill relative ${effectiveStatus === 'ready' ? 'online' : ''} ${effectiveStatus === 'connected' ? 'connected' : ''} ${effectiveStatus === 'connecting' ? 'connecting' : ''} ${effectiveStatus === 'login_required' ? 'login-required' : ''} ${effectiveStatus === 'initializing' ? 'initializing' : ''} ${effectiveStatus === 'busy' ? 'busy' : ''} ${effectiveStatus === 'offline' ? 'offline' : ''} ${effectiveStatus === 'degraded' ? 'degraded' : ''} ${effectiveStatus === 'failed' ? 'failed' : ''}`}
+              className={`window-pill relative ${effectiveStatus === 'ready' ? 'online' : ''} ${effectiveStatus === 'connecting' ? 'connecting' : ''} ${effectiveStatus === 'login_required' ? 'login-required' : ''} ${effectiveStatus === 'initializing' ? 'initializing' : ''} ${effectiveStatus === 'busy' ? 'busy' : ''} ${effectiveStatus === 'offline' ? 'offline' : ''} ${effectiveStatus === 'degraded' ? 'degraded' : ''} ${effectiveStatus === 'failed' ? 'failed' : ''}`}
               onMouseEnter={() => setHoveredWindow(sw.windowName)}
               onMouseLeave={() => setHoveredWindow(null)}
               onClick={() => {
@@ -540,7 +516,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
                   openBrowser(sw.browserId!).catch(e => console.error('[Header] 打开窗口失败:', e));
                 }
               }}
-              title={`${fullLabel}\n状态：${statusLabel[effectiveStatus]}${
+              title={`${fullLabel}\n状态：${getWindowStatusLabel(effectiveStatus)}${
                 effectiveStatus === 'failed'
                   ? '\n弹窗清理失败，重启后仍未就绪'
                   : effectiveStatus === 'degraded'
@@ -602,8 +578,8 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
               >
                 {displayName}
               </span>
-              {/* Phase 4-D: 关闭按钮 — 悬浮显示，busy/offline/initializing/无browserId 不显示 */}
-              {!isOffline && !isInitializing && hasBrowserId && effectiveStatus !== 'busy' && (
+              {/* Phase 4-I-1: 关闭按钮 — 基于 canCloseWindow + hasBrowserId */}
+              {canCloseWindow(effectiveStatus) && hasBrowserId && (
                 <button
                   onClick={(e) => handleCloseWindow(sw, e)}
                   title={`关闭 ${fullLabel}`}
@@ -678,11 +654,12 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
       <div className="topbar-right">
         {/* 刷新 + 时钟 */}
         <button
-          onClick={fetchSiteWindows}
-          className="p-1 rounded hover:bg-surface-light text-text-tertiary transition"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="p-1 rounded hover:bg-surface-light text-text-tertiary transition disabled:opacity-40"
           title="刷新窗口状态"
         >
-          <RotateCw className="w-3 h-3" />
+          <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
 
         <span className="text-[12px] text-text-secondary font-mono">{timeStr}</span>

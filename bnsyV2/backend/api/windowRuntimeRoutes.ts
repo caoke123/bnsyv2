@@ -35,8 +35,21 @@ const adapter = WindowAdapterRegistry.getInstance().getAdapter();
 
 // ── Phase 4-G: 登录弹窗卡死兜底重启 ──
 // 每个员工最多重启 1 次，超过后返回 failed / login_required
+// ★ Phase 4-I-3: retryKey 改为 siteId:staffName，避免跨站点同名员工串扰
 const loginRetryCount = new Map<string, number>();
 const MAX_LOGIN_RETRIES = 1;
+
+/**
+ * Phase 4-I-3: 生成 loginRetryCount 的隔离 key
+ *
+ * 格式：`${siteCode}:${staffName}`
+ *
+ * 作用：避免不同网点同名员工的 retry 计数互相串扰。
+ * 所有 loginRetryCount 的 get/set/delete 必须使用此 key。
+ */
+function getLoginRetryKey(siteCode: string, staffName: string): string {
+  return `${siteCode}:${staffName}`;
+}
 
 /**
  * Phase 4-G: 判断是否因弹窗卡住导致登录/P0 失败
@@ -66,8 +79,9 @@ async function closeWindowForRetry(
   siteName: string,
   siteCode: string,
 ): Promise<void> {
-  console.log(`[LoginGuard] 尝试关闭窗口并重新启动：${staffName}，第 ${(loginRetryCount.get(staffName) ?? 0) + 1} 次`);
-  // 关闭浏览器窗口
+  const retryKey = getLoginRetryKey(siteCode, staffName);
+  console.log(`[LoginGuard] 尝试关闭窗口并重新启动：${staffName}（site=${siteCode}），第 ${(loginRetryCount.get(retryKey) ?? 0) + 1} 次`);
+  // 关闭浏览器窗口（Phase 4-I-2: 统一 close 事务 + cleanup）
   await runtime.closeWindow(runtimeKey).catch(e => {
     console.warn(`[LoginGuard] 关闭窗口异常（忽略继续）: ${(e as Error).message}`);
   });
@@ -93,6 +107,9 @@ async function performLoginWithP0AndRecovery(
   siteName: string,
   siteCode: string,
 ): Promise<{ status: string; message?: string }> {
+  // Phase 4-I-3: retryKey 按 siteId:staffName 隔离，避免跨站点同名员工串扰
+  const retryKey = getLoginRetryKey(siteCode, staffName);
+
   // 首次登录尝试
   const loginUpdate = await tryAutoLoginAfterEnsure(
     { runtimeKey, status: 'login_required', launched: true },
@@ -123,10 +140,10 @@ async function performLoginWithP0AndRecovery(
   }
 
   // ── 弹窗卡死：检查重试次数 ──
-  const retryCount = loginRetryCount.get(staffName) ?? 0;
+  const retryCount = loginRetryCount.get(retryKey) ?? 0;
   if (retryCount >= MAX_LOGIN_RETRIES) {
-    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${p0Report.failedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
-    loginRetryCount.delete(staffName);
+    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}（site=${siteCode}），原因：${p0Report.failedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
+    loginRetryCount.delete(retryKey);
     return {
       status: 'failed',
       message: `弹窗清理失败，重启后仍未就绪 (${p0Report.failedCheck})`,
@@ -134,8 +151,8 @@ async function performLoginWithP0AndRecovery(
   }
 
   // ── 执行重启 ──
-  console.log(`[LoginGuard] 检测到登录后弹窗卡住：${staffName} (${p0Report.failedCheck}: ${p0Report.failedReason})`);
-  loginRetryCount.set(staffName, retryCount + 1);
+  console.log(`[LoginGuard] 检测到登录后弹窗卡住：${staffName}（site=${siteCode}） (${p0Report.failedCheck}: ${p0Report.failedReason})`);
+  loginRetryCount.set(retryKey, retryCount + 1);
 
   // 1. 关闭当前窗口
   await closeWindowForRetry(runtimeKey, staffName, siteName, siteCode);
@@ -152,8 +169,8 @@ async function performLoginWithP0AndRecovery(
 
   if (relaunchResult.status !== 'login_required' && relaunchResult.status !== 'opening') {
     // 重启后状态异常
-    console.error(`[LoginGuard] 重启后窗口状态异常：${staffName}，状态=${relaunchResult.status}`);
-    loginRetryCount.delete(staffName);
+    console.error(`[LoginGuard] 重启后窗口状态异常：${staffName}（site=${siteCode}），状态=${relaunchResult.status}`);
+    loginRetryCount.delete(retryKey);
     return { status: 'failed', message: `重启后窗口状态异常: ${relaunchResult.status}` };
   }
 
@@ -165,8 +182,8 @@ async function performLoginWithP0AndRecovery(
   );
 
   if (retryLoginUpdate.status !== 'ready') {
-    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${retryLoginUpdate.status}`);
-    loginRetryCount.delete(staffName);
+    console.error(`[LoginGuard] 重启后仍未 READY：${staffName}（site=${siteCode}），原因：${retryLoginUpdate.status}`);
+    loginRetryCount.delete(retryKey);
     return { status: 'failed', message: `弹窗清理失败，重启后登录仍未就绪` };
   }
 
@@ -174,15 +191,15 @@ async function performLoginWithP0AndRecovery(
   const retryP0Report = await runP0CheckSafely(relaunchResult.runtimeKey, staffName);
 
   if (retryP0Report && retryP0Report.passed) {
-    console.log(`[LoginGuard] 重启后 READY 通过：${staffName}`);
-    loginRetryCount.delete(staffName);
+    console.log(`[LoginGuard] 重启后 READY 通过：${staffName}（site=${siteCode}）`);
+    loginRetryCount.delete(retryKey);
     return { status: 'ready' };
   }
 
   // 重启后仍然失败
   const retryFailedCheck = retryP0Report?.failedCheck ?? 'unknown';
-  console.error(`[LoginGuard] 重启后仍未 READY：${staffName}，原因：${retryFailedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
-  loginRetryCount.delete(staffName);
+  console.error(`[LoginGuard] 重启后仍未 READY：${staffName}（site=${siteCode}），原因：${retryFailedCheck}（已重启 ${MAX_LOGIN_RETRIES} 次）`);
+  loginRetryCount.delete(retryKey);
   return { status: 'failed', message: `弹窗清理失败，重启后仍未就绪 (${retryFailedCheck})` };
 }
 

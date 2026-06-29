@@ -214,10 +214,18 @@ export class PlaywrightRuntime {
         );
       }
 
-      // 监听 context 关闭事件
+      // 监听 context 关闭事件（手动关闭 Chrome 或外部关闭时触发）
+      // ★ Phase 4-I-2: 调用统一 cleanup，清理所有诊断字段
+      //   Guard: 只在当前 context 就是关闭的这个 context 时才 cleanup，
+      //   避免 launchWindow 先关旧 context 再开新 context 时，旧 close 事件误清新状态
       context.on('close', () => {
-        console.log(`${tag} context 已关闭`);
-        this.stateStore.setStatus(runtimeKey, 'closed');
+        console.log(`${tag} context 已关闭（手动关闭或外部关闭）`);
+        const currentState = this.stateStore.get(runtimeKey);
+        if (currentState?.context === context) {
+          this.clearRuntimeStateForClose(runtimeKey);
+        } else {
+          console.log(`${tag} 当前 context 已更换，跳过 cleanup`);
+        }
       });
 
       const finalState = this.stateStore.get(runtimeKey);
@@ -232,18 +240,22 @@ export class PlaywrightRuntime {
   }
 
   /**
-   * 关闭指定窗口（幂等）
+   * 关闭指定窗口（幂等）— Phase 4-I-2 统一 close 事务
    *
-   * Phase 1-C 修正：已关闭的窗口再次 close 不视为错误。
+   * 事务流程：
+   *   1. busy → 拒绝关闭
+   *   2. 尝试关闭 context（try/catch，失败不阻断 cleanup）
+   *   3. 调用统一 cleanup（clearRuntimeStateForClose）— 无论关闭成功与否
+   *   4. 返回结果
+   *
+   * 幂等保证：
+   *   - 窗口不存在 → success + alreadyClosed
+   *   - 已关闭 → 确保 cleanup 已执行 + success + alreadyClosed
+   *   - context 不存在但状态非 closed → cleanup + success
    *
    * 支持两种调用方式：
    *   1. closeWindow(runtimeKey) — 直接传 runtimeKey
    *   2. closeWindow(tenantId, siteId, windowId) — 传三元组
-   *
-   * 返回值：
-   *   - 首次关闭成功：{ success: true, status: 'closed' }
-   *   - 已关闭再次调用：{ success: true, alreadyClosed: true, status: 'closed' }
-   *   - 关闭失败：{ success: false, status: 'error' }
    */
   async closeWindow(runtimeKeyOrTenantId: string, siteId?: string, windowId?: string): Promise<CloseResult> {
     const runtimeKey = siteId && windowId
@@ -252,24 +264,34 @@ export class PlaywrightRuntime {
     const tag = `[PlaywrightRuntime/${runtimeKey}]`;
 
     const state = this.stateStore.get(runtimeKey);
-    // 幂等：窗口不存在、context 已释放、或状态已为 closed → 返回成功
-    if (!state || !state.context || state.status === 'closed') {
-      console.log(`${tag} 窗口不存在或已关闭（幂等返回）`);
-      if (state) this.stateStore.setStatus(runtimeKey, 'closed');
+
+    // 窗口不存在 → 幂等返回
+    if (!state) {
+      console.log(`${tag} 窗口不存在（幂等返回）`);
       return { success: true, alreadyClosed: true, status: 'closed', runtimeKey };
     }
 
-    try {
-      console.log(`${tag} 正在关闭...`);
-      await state.context.close();
-      this.stateStore.setStatus(runtimeKey, 'closed');
-      console.log(`${tag} ✓ 已关闭`);
-      return { success: true, status: 'closed', runtimeKey };
-    } catch (err) {
-      console.error(`${tag} 关闭失败: ${(err as Error).message}`);
-      this.stateStore.setStatus(runtimeKey, 'error', (err as Error).message);
-      return { success: false, status: 'error', runtimeKey };
+    // busy → 拒绝关闭（前后端双重保护）
+    if (state.status === 'busy') {
+      console.warn(`${tag} 窗口执行中，拒绝关闭`);
+      return { success: false, status: 'busy', runtimeKey };
     }
+
+    // 尝试关闭 context（如果存在）
+    if (state.context) {
+      try {
+        console.log(`${tag} 正在关闭 context...`);
+        await state.context.close();
+      } catch (err) {
+        // 关闭失败不阻断 cleanup — 仍要清理诊断字段
+        console.warn(`${tag} 关闭 context 异常（继续 cleanup）: ${(err as Error).message}`);
+      }
+    }
+
+    // 统一 cleanup — 无论关闭成功与否
+    this.clearRuntimeStateForClose(runtimeKey);
+    console.log(`${tag} ✓ 已关闭并清理诊断字段`);
+    return { success: true, status: 'closed', runtimeKey, alreadyClosed: !state.context };
   }
 
   /**
@@ -742,6 +764,38 @@ export class PlaywrightRuntime {
   }
 
   // ── 内部方法 ──
+
+  /**
+   * 统一清理窗口诊断字段 — Phase 4-I-2
+   *
+   * 关闭窗口时调用，清理所有旧诊断字段，防止下次启动时残留：
+   *   - p0Passed / p0FailedCheck / p0FailedReason / p0CheckedAt
+   *   - currentUrl / activePageUrl / pageCount
+   *   - isLoginPage / isLoggedIn
+   *   - context / page 引用
+   *   - error
+   *
+   * 保留身份字段：runtimeKey / tenantId / siteId / windowId / windowName / staffName / siteName / userDataDir / createdAt
+   *
+   * 幂等：多次调用安全，结果一致。
+   */
+  private clearRuntimeStateForClose(runtimeKey: string): void {
+    this.stateStore.update(runtimeKey, {
+      status: 'closed',
+      p0Passed: undefined,
+      p0FailedCheck: null,
+      p0FailedReason: null,
+      p0CheckedAt: undefined,
+      pageCount: undefined,
+      activePageUrl: undefined,
+      currentUrl: undefined,
+      isLoginPage: undefined,
+      isLoggedIn: undefined,
+      context: undefined,
+      page: undefined,
+      error: undefined,
+    });
+  }
 
   /**
    * 解析登录凭据

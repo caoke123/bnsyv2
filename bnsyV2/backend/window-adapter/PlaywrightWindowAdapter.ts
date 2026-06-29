@@ -127,7 +127,46 @@ export class PlaywrightWindowAdapter {
     console.log(`${tag} 窗口已存在，刷新状态...`);
     const refreshResult = await this.runtime.refreshState(runtimeKey);
     if (refreshResult.notFound || !refreshResult.state) {
-      // 理论上不会走到这里，但防御性处理
+      // ★ Phase 4-I-2: refreshState notFound 说明 page/context 已被清理
+      //   典型场景：closeWindow 后 state.status='closed' 但 page=undefined
+      //   此时不能直接返回 failed，需要按 existing.status 判断是否需要重启
+      const existingStatus = mapStatus(existing.status);
+      if (existingStatus === 'closed' || existingStatus === 'failed') {
+        console.log(`${tag} 窗口状态为 ${existingStatus}（page 已清理），重新启动...`);
+        const launchResult = await this.runtime.launchWindow({
+          tenantId,
+          siteId,
+          windowId,
+          windowName: options.windowName,
+          staffName: options.staffName,
+          siteName: options.siteName,
+          headless: false,
+          autoLogin: false,
+        });
+
+        if (!launchResult.success || !launchResult.state) {
+          console.error(`${tag} 重新启动失败: ${launchResult.error}`);
+          return {
+            runtimeKey,
+            status: 'failed',
+            userDataDir: existing.userDataDir,
+            launched: true,
+            message: launchResult.error || '重新启动失败',
+          };
+        }
+
+        const newState = launchResult.state;
+        return {
+          runtimeKey,
+          status: mapStatus(newState.status),
+          userDataDir: newState.userDataDir,
+          launched: true,
+          currentUrl: newState.currentUrl,
+          isLoggedIn: newState.isLoggedIn,
+          message: newState.status === 'login_required' ? '需要登录' : undefined,
+        };
+      }
+      // 其他状态（ready/busy 等）下 page 丢失 → 真正异常
       return {
         runtimeKey,
         status: 'failed',

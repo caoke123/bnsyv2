@@ -6,8 +6,16 @@ import { useWindowState } from '../components/shared/WindowStateProvider';
 import { useTaskExecution } from '../components/shared/TaskExecutionContext';
 import { useRuntimeMode } from '../components/shared/RuntimeModeProvider';
 import type { ExecutionMode } from '../components/shared/ScanWorkbench';
-import type { WindowState } from '../api/client';
+import type { PlaywrightSiteWindowState } from '../api/client';
 import type { Assignment } from '../lib/assignment-builder';
+import {
+  getWindowDisplayStatus,
+  canSelectAsExecutionWindow,
+  getNodeBadge,
+  getNodeCardClass,
+  getNodeStatusText,
+  type DisplayStatus,
+} from '../lib/window-status';
 
 const PAGE_SIZE_OPTIONS = [30, 50, 100, 200] as const;
 type PageSizeOption = typeof PAGE_SIZE_OPTIONS[number];
@@ -31,13 +39,6 @@ function getWindowColor(name: string): string {
   return WINDOW_COLORS[Math.abs(hash) % WINDOW_COLORS.length];
 }
 
-interface WorkerNode {
-  employeeName: string;
-  windowName: string;
-  browserId: string | null;
-  status: WindowState;
-}
-
 function formatTime(ts: number): string {
   const d = new Date(ts);
   const p = (n: number) => String(n).padStart(2, '0');
@@ -47,7 +48,7 @@ function formatTime(ts: number): string {
 export default function SignPage() {
   const execPanelRef = useRef<HTMLDivElement>(null);
 
-  const { activeSiteId, sites, siteWindows: ctxWindows, siteName, fetchError: ctxFetchError } = useWindowState();
+  const { activeSiteId, sites, siteWindows: ctxWindows, siteName, fetchError: ctxFetchError, isPlaywright } = useWindowState();
 
   // ── 运行模式（Phase 9-dryrun） ──
   const { dryRunMode } = useRuntimeMode();
@@ -62,8 +63,9 @@ export default function SignPage() {
   const [modeToastVisible, setModeToastVisible] = useState(false);
   const modeToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const siteWindows: WorkerNode[] = useMemo(
-    () => ctxWindows.filter(w => w.employeeName).map(w => ({ ...w })),
+  // ★ Phase 4-I-1: 使用 PlaywrightSiteWindowState 保留诊断字段
+  const siteWindows: PlaywrightSiteWindowState[] = useMemo(
+    () => ctxWindows.filter(w => w.employeeName),
     [ctxWindows],
   );
 
@@ -209,9 +211,9 @@ export default function SignPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSiteId]);
 
-  const toggleWorker = useCallback((name: string, nodeStatus: WorkerNode['status']) => {
+  const toggleWorker = useCallback((name: string, displayStatus: DisplayStatus) => {
     if (liveStatus === 'running') return;
-    if (nodeStatus !== 'ready') return;
+    if (!canSelectAsExecutionWindow(displayStatus)) return;
     setSelectedWorkers(prev => {
       // Phase 1: 指定模式下，单选 — 点击新员工时替换原选择
       if (executionMode === 'designated') {
@@ -249,9 +251,12 @@ export default function SignPage() {
   }, [executionMode, selectedWorkers, liveStatus]);
 
   const selectAllOnline = useCallback(() => {
-    const ready = siteWindows.filter(w => w.status === 'ready').map(w => w.employeeName);
+    // Phase 4-I-1: 使用统一 displayStatus 判断 ready
+    const ready = siteWindows
+      .filter(w => getWindowDisplayStatus(w, { isPlaywright, isInitializing: false }) === 'ready')
+      .map(w => w.employeeName);
     setSelectedWorkers(ready);
-  }, [siteWindows]);
+  }, [siteWindows, isPlaywright]);
 
   const doStartTask = useCallback(async () => {
     if (selectedWorkers.length === 0 || !activeSiteId) return;
@@ -310,27 +315,7 @@ export default function SignPage() {
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const logCols = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
 
-  const getStatusBadge = (s: WorkerNode['status']) => {
-    switch (s) {
-      case 'ready': return { cls: 'ready', label: 'READY' };
-      case 'login_required': return { cls: 'login-req', label: 'LOGIN' };
-      case 'connecting': return { cls: 'connected', label: 'INIT' };
-      case 'connected': return { cls: 'connected', label: 'CONN' };
-      case 'busy': return { cls: 'busy', label: 'BUSY' };
-      case 'degraded': return { cls: 'busy', label: 'WARN' };
-      default: return { cls: 'offline-s', label: 'OFF' };
-    }
-  };
-
-  const getCardClass = (s: WorkerNode['status'], isSel: boolean) => {
-    const classes = ['node-card'];
-    if (isSel) classes.push('selected');
-    if (s === 'offline') classes.push('offline-card');
-    if (s === 'busy') classes.push('busy-card');
-    if (s === 'degraded') classes.push('busy-card');
-    if (s === 'login_required') classes.push('login-required-card');
-    return classes.join(' ');
-  };
+  // Phase 4-I-1: getStatusBadge / getCardClass 已迁移到 lib/window-status.ts
 
   const singleSelected = selectedWorkers.length === 1 ? selectedWorkers[0] : null;
   const pageSizeEditable = singleSelected !== null && !isRunning;
@@ -425,7 +410,7 @@ export default function SignPage() {
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="panel-badge">
-                  已选 {selectedWorkers.length} / {executionMode === 'designated' ? 1 : siteWindows.filter(w => w.status === 'ready').length}
+                  已选 {selectedWorkers.length} / {executionMode === 'designated' ? 1 : siteWindows.filter(w => getWindowDisplayStatus(w, { isPlaywright, isInitializing: false }) === 'ready').length}
                 </span>
               </div>
             </div>
@@ -459,20 +444,22 @@ export default function SignPage() {
                   {siteWindows.map(w => {
                     const isSel = selectedWorkers.includes(w.employeeName);
                     const color = getWindowColor(w.employeeName);
-                    const badge = getStatusBadge(w.status);
+                    // Phase 4-I-1: 统一使用 getWindowDisplayStatus 计算 displayStatus
+                    const ds = getWindowDisplayStatus(w, { isPlaywright, isInitializing: false });
+                    const badge = getNodeBadge(ds);
                     const ps = getWorkerPageSize(w.employeeName);
-                    const canClick = w.status === 'ready' && !isRunning;
+                    const canClick = canSelectAsExecutionWindow(ds) && !isRunning;
                     return (
                       <div
                         key={w.employeeName}
-                        className={getCardClass(w.status, isSel)}
-                        onClick={() => canClick && toggleWorker(w.employeeName, w.status)}
+                        className={getNodeCardClass(ds, isSel)}
+                        onClick={() => canClick && toggleWorker(w.employeeName, ds)}
                         style={canClick ? {} : { cursor: 'not-allowed' }}
                       >
                         <div className={`node-status ${badge.cls}`}>{badge.label}</div>
                         <div className="node-avatar" style={{ background: color }}>{w.employeeName[0]}</div>
                         <div className="node-name">{w.employeeName}</div>
-                        <div className="node-alloc">{isSel ? <b>{ps}条/页</b> : '点击选择'}</div>
+                        <div className="node-alloc">{isSel ? <b>{ps}条/页</b> : getNodeStatusText(ds)}</div>
                         <div className="check-mark">
                           <svg viewBox="0 0 10 10" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="1.5,5 4,7.5 8.5,2.5" />
